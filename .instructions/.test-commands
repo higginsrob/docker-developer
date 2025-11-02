@@ -1,0 +1,113 @@
+# Quick Test Commands Reference
+# Save this file for easy copy-paste
+
+# ====================================
+# INSTALLATION
+# ====================================
+npm install
+
+# ====================================
+# RUN TESTS
+# ====================================
+
+# All tests (main + renderer)
+npm run test:all
+
+# Main process only
+npm run test:main
+
+# Renderer only
+npm run test:renderer
+
+# Basic test (main process)
+npm test
+
+# ====================================
+# DEVELOPMENT
+# ====================================
+
+# Watch mode - auto-rerun on changes
+npm run test:watch
+
+# Coverage report
+npm run test:coverage
+
+# ====================================
+# VIEW RESULTS
+# ====================================
+
+# Open coverage report in browser
+open coverage/lcov-report/index.html
+# or on Linux:
+# xdg-open coverage/lcov-report/index.html
+
+# ====================================
+# TROUBLESHOOTING
+# ====================================
+
+# Clear Jest cache
+npx jest --clearCache
+
+# Reinstall dependencies
+rm -rf node_modules package-lock.json
+npm install
+
+# Rebuild native modules
+npm run rebuild
+
+# ====================================
+# SPECIFIC TEST PATTERNS
+# ====================================
+
+# Run only Docker tests
+npx jest docker-containers
+
+# Run only Agent tests
+npx jest ai-agents
+
+# Run only Terminal tests
+npx jest terminal
+
+# Run only Socket tests
+npx jest socket-communication
+
+# Run only Integration tests
+npx jest workflows
+
+# ====================================
+# CI/CD
+# ====================================
+
+# GitHub Actions will automatically run tests on:
+# - Push to main/develop
+# - Pull requests
+
+# ====================================
+# QUICK STATS
+# ====================================
+
+# Total Tests: 144+
+# Main Process: 113 tests
+# Renderer: 22 tests
+# Integration: 9 tests
+# Coverage Goal: 70%+
+
+# ====================================
+# DOCUMENTATION
+# ====================================
+
+# Comprehensive guide:
+# __tests__/README.md
+
+# Quick start:
+# TESTING_QUICK_START.md
+
+# Full summary:
+# TEST_SUITE_SUMMARY.md
+
+# Visual overview:
+# TEST_SUITE_VISUAL_SUMMARY.md
+
+# Checklist:
+# TEST_IMPLEMENTATION_CHECKLIST.md
+

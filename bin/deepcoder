@@ -1,0 +1,2 @@
+#!/bin/sh
+docker model run ai/deepcoder-preview:latest "$@"

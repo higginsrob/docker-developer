@@ -1,0 +1,84 @@
+name: Tests (PR & Development)
+
+on:
+  pull_request:
+    branches: [ main, develop ]
+  push:
+    branches: [ develop ]
+
+jobs:
+  test:
+    runs-on: ${{ matrix.os }}
+    
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        node-version: [20.x]
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Setup Node.js ${{ matrix.node-version }}
+      uses: actions/setup-node@v4
+      with:
+        node-version: ${{ matrix.node-version }}
+        cache: 'npm'
+    
+    - name: Install dependencies (root)
+      run: npm ci
+    
+    - name: Install dependencies (renderer)
+      run: |
+        cd src/renderer
+        npm ci
+    
+    - name: Run main process tests
+      run: npm run test:main
+    
+    - name: Run renderer tests
+      run: npm run test:renderer -- --watchAll=false
+    
+    - name: Generate coverage report
+      run: npm run test:coverage
+    
+    - name: Upload coverage to Codecov
+      uses: codecov/codecov-action@v3
+      with:
+        files: ./coverage/lcov.info
+        flags: unittests
+        name: codecov-${{ matrix.os }}-node-${{ matrix.node-version }}
+      continue-on-error: true
+    
+    - name: Archive test results
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: test-results-${{ matrix.os }}-node-${{ matrix.node-version }}
+        path: coverage/
+        retention-days: 7
+    
+  lint:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '20.x'
+        cache: 'npm'
+    
+    - name: Install dependencies
+      run: npm ci
+    
+    - name: Check TypeScript types (main)
+      run: npx tsc --noEmit -p tsconfig.main.json
+    
+    - name: Check TypeScript types (renderer)
+      run: |
+        cd src/renderer
+        npx tsc --noEmit
+

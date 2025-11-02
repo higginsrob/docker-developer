@@ -43,7 +43,7 @@ This app will be an electron application, written using typescript, react, redux
 
 ###### Chat Header
 
-- Buttons: 'new', 'history', 'settings', and 'close'
+- Buttons: 'history','close'
 
 ##### Chat Prompt
 - We will include a range input to control "Thinking" number of tokens.  Under that we will have an Agent select box that switches the agent mode between "Chat", "Gather", and "Agent".  Next to that we will have a select box of available models.  Last, we have our "send" button.

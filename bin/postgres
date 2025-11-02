@@ -1,0 +1,2 @@
+#!/bin/sh
+docker run --name=postgres --rm -t -i -p 5432:5432 -e POSTGRES_PASSWORD=postgres postgres:latest  "$@"

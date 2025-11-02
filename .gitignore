@@ -1,0 +1,6 @@
+dist
+node_modules
+release
+.DS_Store
+src/renderer/build
+src/renderer/node_modules

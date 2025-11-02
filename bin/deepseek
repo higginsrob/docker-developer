@@ -1,0 +1,2 @@
+#!/bin/sh
+docker model run ai/deepseek-r1-distill-llama "$@"
