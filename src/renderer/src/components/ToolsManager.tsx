@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import io from 'socket.io-client';
-import { ArrowPathIcon, InformationCircleIcon, WrenchScrewdriverIcon, PlayIcon, StopIcon } from '@heroicons/react/24/outline';
+import { ArrowPathIcon, InformationCircleIcon, WrenchScrewdriverIcon } from '@heroicons/react/24/outline';
 
 const socket = io('http://localhost:3002');
 

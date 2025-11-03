@@ -526,7 +526,7 @@ const ChatPanel = forwardRef<ChatPanelRef, ChatPanelProps>(({ isOpen, onClose, s
     maxContext: number;
     usagePercent: number;
   } | null>(null);
-  const [chatHistory, setChatHistory] = useState<ChatSession[]>([]);
+  const [_chatHistory, setChatHistory] = useState<ChatSession[]>([]);
   const [currentSessionId, setCurrentSessionId] = useState<string | null>(null);
   const [isWaitingForResponse, setIsWaitingForResponse] = useState(false);
   const [currentRequestId, setCurrentRequestId] = useState<string | null>(null);
@@ -2015,18 +2015,6 @@ const ChatPanel = forwardRef<ChatPanelRef, ChatPanelProps>(({ isOpen, onClose, s
   const handleMouseDown = (e: React.MouseEvent) => {
     e.preventDefault();
     setIsResizing(true);
-  };
-
-  const handleNewChat = () => {
-    // Save current session before starting new one
-    if (messages.length > 0) {
-      saveCurrentSession();
-    }
-    
-    setMessages([]);
-    setPromptText('');
-    setCurrentSessionId(null);
-    setCurrentContextUsage(null);
   };
 
   const handleToggleExpand = () => {
