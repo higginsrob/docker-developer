@@ -1,6 +1,6 @@
 {
   "name": "docker-developer",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "description": "This app will be an electron application, written using typescript, react, redux, and socket.io that allows the user to manage development resources launched on their development machine.  Similar to the 'Docker Desktop' applicaiton, we will monitor and orchestrate our local docker environment using a graphical UI.  We will have the concept of \"Projects\" to mean a local github repo, usually containing a docker-compose file but allways has a Dockerfile. An ambitious goal we are going to tackle is this: The ability to use locally hosted AI models to assist while building projects, that will not only help to code the app, but they will also have access to the tools to orchestrate the management of this system.  Example, if a user asks to scale a process up or down, the AI agent will have the tools to do so.",
   "main": "dist/main/index.js",
   "scripts": {
