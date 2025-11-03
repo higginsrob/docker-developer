@@ -526,7 +526,7 @@ const ChatPanel = forwardRef<ChatPanelRef, ChatPanelProps>(({ isOpen, onClose, s
     maxContext: number;
     usagePercent: number;
   } | null>(null);
-  const [_chatHistory, setChatHistory] = useState<ChatSession[]>([]);
+  const [, setChatHistory] = useState<ChatSession[]>([]);
   const [currentSessionId, setCurrentSessionId] = useState<string | null>(null);
   const [isWaitingForResponse, setIsWaitingForResponse] = useState(false);
   const [currentRequestId, setCurrentRequestId] = useState<string | null>(null);
@@ -923,33 +923,6 @@ const ChatPanel = forwardRef<ChatPanelRef, ChatPanelProps>(({ isOpen, onClose, s
       document.body.style.userSelect = '';
     };
   }, [isResizing, onClose]);
-
-  // Save current session function
-  const saveCurrentSession = useCallback(() => {
-    if (messages.length === 0 || !selectedAgent) return;
-
-    const sessionId = currentSessionId || Date.now().toString();
-    const session: ChatSession = {
-      id: sessionId,
-      title: messages[0]?.content.substring(0, 50) || 'New Chat',
-      messages,
-      tokensUsed: 0, // TODO: Calculate actual tokens
-      changedLines: 0, // TODO: Track changed lines
-      isProcessing: isWaitingForResponse,
-      lastUpdated: new Date(),
-    };
-
-    // Save to agent-specific history
-    socket.emit('saveAgentChatSession', { 
-      projectPath: getProjectPathFromContext(selectedContext), 
-      agentId: selectedAgent.id,
-      session 
-    });
-    
-    if (!currentSessionId) {
-      setCurrentSessionId(sessionId);
-    }
-  }, [messages, currentSessionId, isWaitingForResponse, selectedContext, selectedAgent]);
 
   // Load models and chat history on mount
   useEffect(() => {
