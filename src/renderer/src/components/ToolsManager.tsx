@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import io from 'socket.io-client';
+import { ArrowPathIcon, InformationCircleIcon, WrenchScrewdriverIcon, PlayIcon, StopIcon } from '@heroicons/react/24/outline';
 
 const socket = io('http://localhost:3002');
 
@@ -66,7 +67,7 @@ const ToolsManager: React.FC = () => {
           className="flex items-center space-x-2 bg-docker-blue hover:bg-blue-600 text-white font-medium px-5 py-2.5 rounded-lg shadow-md hover:shadow-lg transition-all duration-200"
           disabled={loading}
         >
-          <span className="text-lg">🔄</span>
+          <ArrowPathIcon className="w-5 h-5" />
           <span>{loading ? 'Loading...' : 'Refresh'}</span>
         </button>
       </div>
@@ -74,7 +75,7 @@ const ToolsManager: React.FC = () => {
       {/* Info Banner */}
       <div className="bg-blue-900 border border-blue-700 rounded-lg p-4">
         <div className="flex items-start space-x-3">
-          <span className="text-2xl">ℹ️</span>
+          <InformationCircleIcon className="w-6 h-6 text-blue-300" />
           <div className="flex-1">
             <h4 className="text-sm font-semibold text-blue-200 mb-1">About MCP Tools</h4>
             <p className="text-sm text-blue-300">
@@ -88,13 +89,13 @@ const ToolsManager: React.FC = () => {
       {/* Tools Table */}
       {loading ? (
         <div className="bg-gray-800 rounded-xl shadow-sm border border-gray-700 p-12 text-center">
-          <div className="text-6xl mb-4 animate-pulse">🔧</div>
+          <WrenchScrewdriverIcon className="w-16 h-16 mx-auto mb-4 text-gray-500 animate-pulse" />
           <h3 className="text-xl font-semibold text-gray-200 mb-2">Loading MCP Servers...</h3>
           <p className="text-gray-400">Please wait while we fetch available tools</p>
         </div>
       ) : servers.length === 0 ? (
         <div className="bg-gray-800 rounded-xl shadow-sm border border-gray-700 p-12 text-center">
-          <div className="text-6xl mb-4">🔧</div>
+          <WrenchScrewdriverIcon className="w-16 h-16 mx-auto mb-4 text-gray-500" />
           <h3 className="text-xl font-semibold text-gray-200 mb-2">No MCP Servers Found</h3>
           <p className="text-gray-400 mb-4">Install MCP servers using Docker to extend AI capabilities</p>
           <code className="block bg-gray-700 text-gray-200 px-4 py-2 rounded font-mono text-sm">
@@ -129,7 +130,7 @@ const ToolsManager: React.FC = () => {
                   <tr key={server.name} className="hover:bg-gray-700 transition-colors">
                     <td className="px-6 py-4">
                       <div className="flex items-center space-x-2">
-                        <span className="text-2xl">🔧</span>
+                        <WrenchScrewdriverIcon className="w-5 h-5 text-blue-400" />
                         <span className="font-medium text-gray-100">{server.name}</span>
                       </div>
                     </td>
@@ -165,7 +166,15 @@ const ToolsManager: React.FC = () => {
                             : 'bg-green-600 text-white hover:bg-green-700'
                         }`}
                       >
-                        {server.enabled ? '⏸️ Disable' : '▶️ Enable'}
+                        {server.enabled ? (
+                          <>
+                            Disable
+                          </>
+                        ) : (
+                          <>
+                            Enable
+                          </>
+                        )}
                       </button>
                     </td>
                   </tr>

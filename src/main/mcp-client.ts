@@ -353,6 +353,10 @@ export class MCPClient extends EventEmitter {
     return this.tools;
   }
 
+  async refreshTools(): Promise<void> {
+    await this.listTools();
+  }
+
   getToolsPrompt(): string {
     if (this.tools.length === 0) {
       return '';

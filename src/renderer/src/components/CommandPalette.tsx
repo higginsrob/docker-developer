@@ -5,7 +5,7 @@ interface Command {
   label: string;
   description?: string;
   action: () => void;
-  icon?: string;
+  icon?: React.ComponentType<{ className?: string }>;
 }
 
 interface CommandPaletteProps {
@@ -104,28 +104,31 @@ const CommandPalette: React.FC<CommandPaletteProps> = ({ isOpen, onClose, comman
           {filteredCommands.length === 0 ? (
             <div className="p-4 text-gray-400 text-center">No commands found</div>
           ) : (
-            filteredCommands.map((command, index) => (
-              <div
-                key={command.id}
-                onClick={() => {
-                  command.action();
-                  onClose();
-                }}
-                className={`px-4 py-3 cursor-pointer flex items-center space-x-3 ${
-                  index === selectedIndex
-                    ? 'bg-blue-600 text-white'
-                    : 'text-gray-200 hover:bg-gray-700'
-                }`}
-              >
-                {command.icon && <span className="text-xl">{command.icon}</span>}
-                <div className="flex-1">
-                  <div className="font-medium">{command.label}</div>
-                  {command.description && (
-                    <div className="text-sm opacity-75">{command.description}</div>
-                  )}
+            filteredCommands.map((command, index) => {
+              const IconComponent = command.icon;
+              return (
+                <div
+                  key={command.id}
+                  onClick={() => {
+                    command.action();
+                    onClose();
+                  }}
+                  className={`px-4 py-3 cursor-pointer flex items-center space-x-3 ${
+                    index === selectedIndex
+                      ? 'bg-blue-600 text-white'
+                      : 'text-gray-200 hover:bg-gray-700'
+                  }`}
+                >
+                  {IconComponent && <IconComponent className="w-5 h-5" />}
+                  <div className="flex-1">
+                    <div className="font-medium">{command.label}</div>
+                    {command.description && (
+                      <div className="text-sm opacity-75">{command.description}</div>
+                    )}
+                  </div>
                 </div>
-              </div>
-            ))
+              );
+            })
           )}
         </div>
       </div>
@@ -134,6 +137,13 @@ const CommandPalette: React.FC<CommandPaletteProps> = ({ isOpen, onClose, comman
 };
 
 export default CommandPalette;
+
+
+
+
+
+
+
 
 
 

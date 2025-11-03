@@ -128,7 +128,7 @@ export class RAGService {
     try {
       console.log('Loading sql.js library...');
       this.sqlJsLib = await initSqlJs();
-      console.log('✅ sql.js library loaded successfully');
+      console.log('[✓] sql.js library loaded successfully');
       
       console.log('=== RAG Service Initialization ===');
       console.log('Initializing RAG service...');
@@ -147,10 +147,10 @@ export class RAGService {
       if (fs.existsSync(this.dbPath)) {
         const buffer = fs.readFileSync(this.dbPath);
         this.db = new this.sqlJsLib.Database(buffer);
-        console.log('✅ Database loaded from file');
+        console.log('[✓] Database loaded from file');
       } else {
         this.db = new this.sqlJsLib.Database();
-        console.log('✅ New database created');
+        console.log('[✓] New database created');
       }
       
       // Create tables
@@ -161,7 +161,7 @@ export class RAGService {
       // Initialize embedding model
       console.log('Loading embedding model...');
       await this.initializeEmbeddingModel();
-      console.log('✅ Embedding model loaded');
+      console.log('[✓] Embedding model loaded');
       
       console.log('=== RAG Service Initialization Complete ===');
       console.log('RAG service initialized successfully - database ready');
@@ -302,7 +302,7 @@ export class RAGService {
         { quantized: true }
       );
       this.embeddingModelLoaded = true;
-      console.log('✅ Advanced embedding model loaded successfully');
+      console.log('[✓] Advanced embedding model loaded successfully');
     } catch (error: any) {
       console.error('Failed to load embedding model:', error);
       console.error('Error details:', {
@@ -2017,7 +2017,7 @@ export class RAGService {
       // Save database to disk
       this.saveDatabase();
       
-      console.log('[RAG] ✅ All RAG data cleared successfully');
+      console.log('[RAG] [✓] All RAG data cleared successfully');
     } catch (error) {
       console.error('[RAG] Failed to clear all RAG data:', error);
       throw error;

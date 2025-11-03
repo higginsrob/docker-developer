@@ -1,5 +1,10 @@
 import React, { useEffect, useState, useMemo } from 'react';
 import io from 'socket.io-client';
+import {
+  MagnifyingGlassIcon,
+  GlobeAltIcon,
+  TrashIcon,
+} from '@heroicons/react/24/outline';
 
 const socket = io('http://localhost:3002');
 
@@ -139,12 +144,15 @@ const Network: React.FC = () => {
         {/* Search Bar */}
         <div className="flex items-center space-x-3">
           <div className="flex-1 relative">
+            <div className="absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-500">
+              <MagnifyingGlassIcon className="w-5 h-5" />
+            </div>
             <input
               type="text"
-              placeholder="🔍 Filter by network name..."
+              placeholder="Filter by network name..."
               value={filter}
               onChange={(e) => setFilter(e.target.value)}
-              className="w-full px-4 py-3 pl-4 border border-gray-600 rounded-lg bg-gray-800 text-gray-200 placeholder-gray-500 focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none transition-all"
+              className="w-full px-4 py-3 pl-10 border border-gray-600 rounded-lg bg-gray-800 text-gray-200 placeholder-gray-500 focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none transition-all"
             />
           </div>
           <div className="text-sm text-gray-400">
@@ -156,7 +164,7 @@ const Network: React.FC = () => {
       {/* Networks Table */}
       {networks.length === 0 ? (
         <div className="bg-gray-800 rounded-xl shadow-sm border border-gray-700 p-12 text-center">
-          <div className="text-6xl mb-4">🌐</div>
+          <GlobeAltIcon className="w-16 h-16 mx-auto mb-4 text-gray-500" />
           <h3 className="text-xl font-semibold text-gray-200 mb-2">No Networks</h3>
           <p className="text-gray-400">No Docker networks found</p>
         </div>
@@ -196,7 +204,7 @@ const Network: React.FC = () => {
                     <tr key={network.Id} className="hover:bg-gray-700 transition-colors">
                       <td className="px-6 py-4">
                         <div className="flex items-center space-x-2">
-                          <span className="text-2xl">🌐</span>
+                          <GlobeAltIcon className="w-5 h-5 text-blue-400" />
                           <div className="flex items-center space-x-2">
                             <span className="font-medium text-gray-100">{network.Name}</span>
                             {isSystemNetwork && (
@@ -219,9 +227,10 @@ const Network: React.FC = () => {
                         {!isSystemNetwork ? (
                           <button
                             onClick={() => handleDelete(network.Id)}
-                            className="px-3 py-1.5 bg-red-600 text-white hover:bg-red-700 rounded-md text-sm font-medium transition-colors"
+                            className="px-3 py-1.5 bg-red-600 text-white hover:bg-red-700 rounded-md text-sm font-medium transition-colors flex items-center space-x-1"
                           >
-                            🗑️ Delete
+                            <TrashIcon className="w-4 h-4" />
+                            <span>Delete</span>
                           </button>
                         ) : (
                           <span className="text-xs text-gray-400">Protected</span>

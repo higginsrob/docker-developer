@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import io from 'socket.io-client';
+import { RocketLaunchIcon, PencilIcon, TrashIcon, CheckIcon, SparklesIcon, ArrowPathIcon, CheckCircleIcon, XCircleIcon } from '@heroicons/react/24/outline';
 
 const socket = io('http://localhost:3002');
 
@@ -294,7 +295,11 @@ const DevEnvironments: React.FC<DevEnvironmentsProps> = ({ onLaunch, initialGitH
             : 'bg-red-50 border border-red-200 text-red-800'
         }`}>
           <div className="flex items-center space-x-2">
-            <span className="text-xl">{launchStatus.success ? '✅' : '❌'}</span>
+            {launchStatus.success ? (
+              <CheckCircleIcon className="w-6 h-6" />
+            ) : (
+              <XCircleIcon className="w-6 h-6" />
+            )}
             <span>{launchStatus.message}</span>
           </div>
         </div>
@@ -321,8 +326,18 @@ const DevEnvironments: React.FC<DevEnvironmentsProps> = ({ onLaunch, initialGitH
       {showForm && (
         <form onSubmit={handleSubmit} className="bg-white rounded-xl shadow-sm border border-gray-100 p-6 space-y-6 animate-slide-in">
           <div className="flex items-center justify-between border-b border-gray-200 pb-4">
-            <h3 className="text-xl font-bold text-gray-900">
-              {isEditing ? '✏️ Edit Dev Environment' : '✨ Create New Dev Environment'}
+            <h3 className="text-xl font-bold text-gray-900 flex items-center space-x-2">
+              {isEditing ? (
+                <>
+                  <PencilIcon className="w-6 h-6" />
+                  <span>Edit Dev Environment</span>
+                </>
+              ) : (
+                <>
+                  <SparklesIcon className="w-6 h-6" />
+                  <span>Create New Dev Environment</span>
+                </>
+              )}
             </h3>
             <button
               type="button"
@@ -688,7 +703,17 @@ const DevEnvironments: React.FC<DevEnvironmentsProps> = ({ onLaunch, initialGitH
               type="submit"
               className="btn-primary"
             >
-              {isEditing ? '💾 Save Changes' : '✨ Create Dev Environment'}
+              {isEditing ? (
+                <>
+                  <CheckIcon className="w-4 h-4 inline mr-1" />
+                  Save Changes
+                </>
+              ) : (
+                <>
+                  <SparklesIcon className="w-4 h-4 inline mr-1" />
+                  Create Dev Environment
+                </>
+              )}
             </button>
           </div>
         </form>
@@ -699,7 +724,7 @@ const DevEnvironments: React.FC<DevEnvironmentsProps> = ({ onLaunch, initialGitH
         <div className="space-y-4">
           {devEnvironments.length === 0 ? (
             <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-12 text-center">
-              <div className="text-6xl mb-4">🚀</div>
+              <RocketLaunchIcon className="w-16 h-16 mx-auto mb-4 text-gray-400" />
               <h3 className="text-xl font-semibold text-gray-700 mb-2">No Dev Environments</h3>
               <p className="text-gray-500 mb-6">Create your first dev environment to get started</p>
               <button
@@ -720,7 +745,7 @@ const DevEnvironments: React.FC<DevEnvironmentsProps> = ({ onLaunch, initialGitH
                   >
                     <div className="flex items-start justify-between mb-4">
                       <div className="flex items-center space-x-3">
-                        <span className="text-3xl">🚀</span>
+                        <RocketLaunchIcon className="w-8 h-8 text-purple-500" />
                         <div>
                           <h4 className="text-lg font-semibold text-gray-900">{env.name}</h4>
                           <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-green-100 text-green-800">
@@ -780,21 +805,33 @@ const DevEnvironments: React.FC<DevEnvironmentsProps> = ({ onLaunch, initialGitH
                                 : 'bg-green-100 hover:bg-green-200 text-green-700'
                             } font-medium rounded-lg transition-colors`}
                           >
-                            {isRunning ? '🔄 Restart' : '🚀 Launch'}
+                            {isRunning ? (
+                              <>
+                                <ArrowPathIcon className="w-4 h-4 inline mr-1" />
+                                Restart
+                              </>
+                            ) : (
+                              <>
+                                <RocketLaunchIcon className="w-4 h-4 inline mr-1" />
+                                Launch
+                              </>
+                            )}
                           </button>
                         );
                       })()}
                       <button
                         onClick={() => handleSelectDevEnvironment(env.name)}
-                        className="flex-1 py-2 px-4 bg-blue-100 hover:bg-blue-200 text-blue-700 font-medium rounded-lg transition-colors"
+                        className="flex-1 py-2 px-4 bg-blue-100 hover:bg-blue-200 text-blue-700 font-medium rounded-lg transition-colors flex items-center justify-center space-x-1"
                       >
-                        ✏️ Edit
+                        <PencilIcon className="w-4 h-4" />
+                        <span>Edit</span>
                       </button>
                       <button
                         onClick={() => handleDeleteDevEnvironment(env.name)}
-                        className="flex-1 py-2 px-4 bg-red-100 hover:bg-red-200 text-red-700 font-medium rounded-lg transition-colors"
+                        className="flex-1 py-2 px-4 bg-red-100 hover:bg-red-200 text-red-700 font-medium rounded-lg transition-colors flex items-center justify-center space-x-1"
                       >
-                        🗑️ Remove
+                        <TrashIcon className="w-4 h-4" />
+                        <span>Remove</span>
                       </button>
                     </div>
                   </div>

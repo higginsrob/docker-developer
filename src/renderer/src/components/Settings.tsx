@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import io from 'socket.io-client';
+import { ArrowPathIcon } from '@heroicons/react/24/outline';
 
 const socket = io('http://localhost:3002');
 
@@ -146,7 +147,7 @@ const Settings: React.FC<{ userProfile: UserProfile; onRefresh?: () => void }> =
               className="flex items-center space-x-2 px-4 py-2 bg-gray-100 hover:bg-gray-200 text-gray-700 rounded-lg transition-colors"
               title="Refresh all data"
             >
-              <span className="text-lg">🔄</span>
+              <ArrowPathIcon className="w-5 h-5" />
               <span className="font-medium">Refresh</span>
             </button>
           )}

@@ -4,10 +4,55 @@ import './ChatPanel.css';
 import { Agent } from './Agents';
 import MessageRenderer from './MessageRenderer';
 import JSONExplorer from './JSONExplorer';
+import { WrenchScrewdriverIcon, CpuChipIcon, UserIcon, PhotoIcon } from '@heroicons/react/24/outline';
+
+// Circle progress component for context usage visualization
+const CircleProgress: React.FC<{ percentage: number; size?: number }> = React.memo(({ percentage, size = 24 }) => {
+  const radius = (size - 4) / 2;
+  const circumference = 2 * Math.PI * radius;
+  const strokeDashoffset = circumference - (percentage / 100) * circumference;
+  
+  // Color based on usage percentage
+  const getColor = (pct: number) => {
+    if (pct >= 90) return '#ef4444'; // red
+    if (pct >= 70) return '#f59e0b'; // orange
+    return '#10b981'; // green
+  };
+  
+  return (
+    <svg width={size} height={size} className="circle-progress">
+      {/* Background circle */}
+      <circle
+        cx={size / 2}
+        cy={size / 2}
+        r={radius}
+        fill="none"
+        stroke="#404040"
+        strokeWidth="2"
+      />
+      {/* Progress circle */}
+      <circle
+        cx={size / 2}
+        cy={size / 2}
+        r={radius}
+        fill="none"
+        stroke={getColor(percentage)}
+        strokeWidth="2"
+        strokeDasharray={circumference}
+        strokeDashoffset={strokeDashoffset}
+        strokeLinecap="round"
+        transform={`rotate(-90 ${size / 2} ${size / 2})`}
+        style={{ transition: 'stroke-dashoffset 0.3s ease' }}
+      />
+    </svg>
+  );
+});
 
 const socket = io('http://localhost:3002');
 const CHAT_PANEL_WIDTH_KEY = 'chatPanelWidth';
+const CHAT_PANEL_EXPANDED_KEY = 'chatPanelExpanded';
 const USER_SETTINGS_KEY = 'userSettings';
+const SELECTED_TOOLS_KEY = 'selectedTools';
 
 interface UserSettings {
   allowUseGitName: boolean;
@@ -58,6 +103,37 @@ const loadUserSettings = (): UserSettings => {
   };
 };
 
+// Load selected tools from localStorage for a specific agent
+const loadSelectedTools = (agentId: string | null | undefined): string[] => {
+  if (!agentId) return [];
+  
+  try {
+    const saved = localStorage.getItem(SELECTED_TOOLS_KEY);
+    if (saved) {
+      const allTools = JSON.parse(saved);
+      // Return tools for this specific agent, or empty array if none saved
+      return allTools[agentId] || [];
+    }
+  } catch (error) {
+    console.error('Error loading selected tools:', error);
+  }
+  return [];
+};
+
+// Save selected tools to localStorage for a specific agent
+const saveSelectedTools = (agentId: string | null | undefined, tools: string[]): void => {
+  if (!agentId) return;
+  
+  try {
+    const saved = localStorage.getItem(SELECTED_TOOLS_KEY);
+    const allTools = saved ? JSON.parse(saved) : {};
+    allTools[agentId] = tools;
+    localStorage.setItem(SELECTED_TOOLS_KEY, JSON.stringify(allTools));
+  } catch (error) {
+    console.error('Error saving selected tools:', error);
+  }
+};
+
 interface UserProfile {
   email: string;
   name: string;
@@ -87,11 +163,9 @@ interface ChatPanelProps {
   onOpenTerminal?: () => void;
 }
 
-type ViewMode = 'chat' | 'history';
-
 interface ChatMessage {
   id: string;
-  type: 'prompt' | 'response' | 'toolResult';
+  type: 'prompt' | 'response' | 'toolResult' | 'toolCall';
   content: string;
   expanded: boolean;
   timestamp: Date;
@@ -101,6 +175,12 @@ interface ChatMessage {
   toolResult?: any; // Tool result data (for toolResult type messages)
   _requestId?: string; // Request ID to match with token usage
   _isPlaceholder?: boolean; // Flag to identify placeholder messages
+  _isToolCallOnly?: boolean; // Flag to indicate this response is only a tool call
+  contextUsage?: {
+    promptTokens: number;
+    maxContext: number;
+    usagePercent: number;
+  };
 }
 
 interface Model {
@@ -132,6 +212,26 @@ const loadChatPanelWidth = (): number => {
   return 500; // Default width
 };
 
+// Load chat panel expanded state from localStorage
+const loadChatPanelExpanded = (): boolean => {
+  try {
+    const saved = localStorage.getItem(CHAT_PANEL_EXPANDED_KEY);
+    return saved === 'true';
+  } catch (error) {
+    console.error('Error loading chat panel expanded state:', error);
+  }
+  return false; // Default to not expanded
+};
+
+// Save chat panel expanded state to localStorage
+const saveChatPanelExpanded = (isExpanded: boolean): void => {
+  try {
+    localStorage.setItem(CHAT_PANEL_EXPANDED_KEY, String(isExpanded));
+  } catch (error) {
+    console.error('Error saving chat panel expanded state:', error);
+  }
+};
+
 // Helper function to parse final answer from response text
 // Looks for common patterns like '\n--\n' and '\nAnswer:\n'
 // If no pattern is found, returns the entire response
@@ -140,11 +240,21 @@ const parseFinalAnswer = (fullResponse: string): string => {
     return fullResponse;
   }
   
+  // First, remove any tool call JSON blocks from the response
+  // Pattern: ```json\n{"tool_call": {...}}\n``` 
+  const toolCallPattern = /```json\s*\n\{[\s\S]*?"tool_call"[\s\S]*?\}\s*\n```/g;
+  let cleanedResponse = fullResponse.replace(toolCallPattern, '').trim();
+  
+  // If after removing tool calls, there's nothing left, return empty
+  if (!cleanedResponse) {
+    return cleanedResponse;
+  }
+  
   // Try pattern: '\n--\n' (common separator)
   const separatorPattern = /\n--\n/;
-  const separatorMatch = fullResponse.search(separatorPattern);
+  const separatorMatch = cleanedResponse.search(separatorPattern);
   if (separatorMatch !== -1) {
-    const finalAnswer = fullResponse.substring(separatorMatch + 4).trim();
+    const finalAnswer = cleanedResponse.substring(separatorMatch + 4).trim();
     if (finalAnswer.length > 0) {
       return finalAnswer;
     }
@@ -152,9 +262,9 @@ const parseFinalAnswer = (fullResponse: string): string => {
   
   // Try pattern: '\nAnswer:\n' (common answer marker)
   const answerPattern1 = /\nAnswer:\s*\n/i;
-  const answerMatch1 = fullResponse.match(answerPattern1);
+  const answerMatch1 = cleanedResponse.match(answerPattern1);
   if (answerMatch1 && answerMatch1.index !== undefined) {
-    const finalAnswer = fullResponse.substring(answerMatch1.index + answerMatch1[0].length).trim();
+    const finalAnswer = cleanedResponse.substring(answerMatch1.index + answerMatch1[0].length).trim();
     if (finalAnswer.length > 0) {
       return finalAnswer;
     }
@@ -162,9 +272,9 @@ const parseFinalAnswer = (fullResponse: string): string => {
   
   // Try pattern: 'Answer:' (without newline)
   const answerPattern2 = /Answer:\s*/i;
-  const answerMatch2 = fullResponse.match(answerPattern2);
+  const answerMatch2 = cleanedResponse.match(answerPattern2);
   if (answerMatch2 && answerMatch2.index !== undefined) {
-    const finalAnswer = fullResponse.substring(answerMatch2.index + answerMatch2[0].length).trim();
+    const finalAnswer = cleanedResponse.substring(answerMatch2.index + answerMatch2[0].length).trim();
     if (finalAnswer.length > 0) {
       return finalAnswer;
     }
@@ -172,16 +282,16 @@ const parseFinalAnswer = (fullResponse: string): string => {
   
   // Try pattern: 'Final Answer:' or 'Final Answer:'
   const finalAnswerPattern = /Final\s+Answer:\s*/i;
-  const finalAnswerMatch = fullResponse.match(finalAnswerPattern);
+  const finalAnswerMatch = cleanedResponse.match(finalAnswerPattern);
   if (finalAnswerMatch && finalAnswerMatch.index !== undefined) {
-    const finalAnswer = fullResponse.substring(finalAnswerMatch.index + finalAnswerMatch[0].length).trim();
+    const finalAnswer = cleanedResponse.substring(finalAnswerMatch.index + finalAnswerMatch[0].length).trim();
     if (finalAnswer.length > 0) {
       return finalAnswer;
     }
   }
   
-  // No pattern found - return entire response (will be parsed as markdown)
-  return fullResponse;
+  // No pattern found - return cleaned response (will be parsed as markdown)
+  return cleanedResponse;
 };
 
 // Helper function to separate thinking from answer
@@ -190,44 +300,52 @@ const separateThinkingAndAnswer = (fullResponse: string): { thinking: string; an
     return { thinking: '', answer: '' };
   }
   
+  // First, remove any tool call JSON blocks from the response
+  const toolCallPattern = /```json\s*\n\{[\s\S]*?"tool_call"[\s\S]*?\}\s*\n```/g;
+  let cleanedResponse = fullResponse.replace(toolCallPattern, '').trim();
+  
+  if (!cleanedResponse) {
+    return { thinking: '', answer: '' };
+  }
+  
   // Try pattern: '\n--\n' (common separator)
   const separatorPattern = /\n--\n/;
-  const separatorMatch = fullResponse.search(separatorPattern);
+  const separatorMatch = cleanedResponse.search(separatorPattern);
   if (separatorMatch !== -1) {
-    const thinking = fullResponse.substring(0, separatorMatch).trim();
-    const answer = fullResponse.substring(separatorMatch + 4).trim();
+    const thinking = cleanedResponse.substring(0, separatorMatch).trim();
+    const answer = cleanedResponse.substring(separatorMatch + 4).trim();
     return { thinking, answer };
   }
   
   // Try pattern: '\nAnswer:\n' (common answer marker)
   const answerPattern1 = /\nAnswer:\s*\n/i;
-  const answerMatch1 = fullResponse.match(answerPattern1);
+  const answerMatch1 = cleanedResponse.match(answerPattern1);
   if (answerMatch1 && answerMatch1.index !== undefined) {
-    const thinking = fullResponse.substring(0, answerMatch1.index).trim();
-    const answer = fullResponse.substring(answerMatch1.index + answerMatch1[0].length).trim();
+    const thinking = cleanedResponse.substring(0, answerMatch1.index).trim();
+    const answer = cleanedResponse.substring(answerMatch1.index + answerMatch1[0].length).trim();
     return { thinking, answer };
   }
   
   // Try pattern: 'Answer:' (without newline)
   const answerPattern2 = /Answer:\s*/i;
-  const answerMatch2 = fullResponse.match(answerPattern2);
+  const answerMatch2 = cleanedResponse.match(answerPattern2);
   if (answerMatch2 && answerMatch2.index !== undefined) {
-    const thinking = fullResponse.substring(0, answerMatch2.index).trim();
-    const answer = fullResponse.substring(answerMatch2.index + answerMatch2[0].length).trim();
+    const thinking = cleanedResponse.substring(0, answerMatch2.index).trim();
+    const answer = cleanedResponse.substring(answerMatch2.index + answerMatch2[0].length).trim();
     return { thinking, answer };
   }
   
   // Try pattern: 'Final Answer:' or 'Final Answer:'
   const finalAnswerPattern = /Final\s+Answer:\s*/i;
-  const finalAnswerMatch = fullResponse.match(finalAnswerPattern);
+  const finalAnswerMatch = cleanedResponse.match(finalAnswerPattern);
   if (finalAnswerMatch && finalAnswerMatch.index !== undefined) {
-    const thinking = fullResponse.substring(0, finalAnswerMatch.index).trim();
-    const answer = fullResponse.substring(finalAnswerMatch.index + finalAnswerMatch[0].length).trim();
+    const thinking = cleanedResponse.substring(0, finalAnswerMatch.index).trim();
+    const answer = cleanedResponse.substring(finalAnswerMatch.index + finalAnswerMatch[0].length).trim();
     return { thinking, answer };
   }
   
-  // No pattern found - treat entire response as answer
-  return { thinking: '', answer: fullResponse };
+  // No pattern found - treat entire cleaned response as answer
+  return { thinking: '', answer: cleanedResponse };
 };
 
 // Helper function to calculate confidence score
@@ -319,24 +437,110 @@ const formatTokensPerSecondWithColor = (tokensPerSecond: number): string => {
   return `${formatted} tokens/s`;
 };
 
+// Helper function to parse tool calls from message content
+const parseToolCalls = (content: string): Array<{ name: string; arguments: any }> => {
+  const toolCalls: Array<{ name: string; arguments: any }> = [];
+  
+  // Match JSON code blocks with tool_call format
+  // Pattern: ```json\n{"tool_call": {"name": "...", "arguments": {...}}}\n```
+  const codeBlockPattern = /```json\s*\n(\{[\s\S]*?\})\s*\n```/g;
+  let match;
+  
+  while ((match = codeBlockPattern.exec(content)) !== null) {
+    try {
+      const jsonStr = match[1];
+      const parsed = JSON.parse(jsonStr);
+      
+      // Check if it's a tool_call format
+      if (parsed.tool_call && parsed.tool_call.name) {
+        toolCalls.push({
+          name: parsed.tool_call.name,
+          arguments: parsed.tool_call.arguments || {}
+        });
+      }
+    } catch (err) {
+      // Not a valid tool call, continue parsing other blocks
+    }
+  }
+  
+  return toolCalls;
+};
+
+// Helper function to check if content is ONLY a tool call (nothing else)
+const isOnlyToolCall = (content: string): { isOnly: boolean; toolName?: string } => {
+  if (!content || content.trim().length === 0) {
+    return { isOnly: false };
+  }
+  
+  // Match the entire content to see if it's just a tool call
+  const trimmedContent = content.trim();
+  const codeBlockPattern = /^```json\s*\n(\{[\s\S]*?\})\s*\n```$/;
+  const match = trimmedContent.match(codeBlockPattern);
+  
+  if (match) {
+    try {
+      const jsonStr = match[1];
+      const parsed = JSON.parse(jsonStr);
+      
+      // Check if it's a tool_call format and ONLY that
+      if (parsed.tool_call && parsed.tool_call.name) {
+        return { isOnly: true, toolName: parsed.tool_call.name };
+      }
+    } catch (err) {
+      // Not a valid tool call
+    }
+  }
+  
+  return { isOnly: false };
+};
+
+// Helper function to replace tool call JSON blocks with simplified display
+const replaceToolCallsInContent = (content: string): string => {
+  // Match JSON code blocks with tool_call format
+  const codeBlockPattern = /```json\s*\n(\{[\s\S]*?\})\s*\n```/g;
+  
+  return content.replace(codeBlockPattern, (match, jsonStr) => {
+    try {
+      const parsed = JSON.parse(jsonStr);
+      
+      // Check if it's a tool_call format
+      if (parsed.tool_call && parsed.tool_call.name) {
+        return `### Tool call: ${parsed.tool_call.name}`;
+      }
+    } catch (err) {
+      // Not a valid tool call, return original
+    }
+    return match;
+  });
+};
+
 const ChatPanel = forwardRef<ChatPanelRef, ChatPanelProps>(({ isOpen, onClose, selectedContext, selectedAgent, agents = [], userProfile, terminalHeight = 0, onAgentChatStart, onClearAgentTabs, onClearAgentTab, onOpenTerminal }, ref) => {
   const [width, setWidth] = useState(loadChatPanelWidth());
   const [isResizing, setIsResizing] = useState(false);
-  const [viewMode, setViewMode] = useState<ViewMode>('chat');
+  const [isExpanded, setIsExpanded] = useState(loadChatPanelExpanded());
   const [thinkingTokens, setThinkingTokens] = useState(8192); // Default to 8192 for larger context
   const [promptText, setPromptText] = useState('');
   const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [currentContextUsage, setCurrentContextUsage] = useState<{
+    promptTokens: number;
+    maxContext: number;
+    usagePercent: number;
+  } | null>(null);
   const [chatHistory, setChatHistory] = useState<ChatSession[]>([]);
   const [currentSessionId, setCurrentSessionId] = useState<string | null>(null);
   const [isWaitingForResponse, setIsWaitingForResponse] = useState(false);
   const [currentRequestId, setCurrentRequestId] = useState<string | null>(null);
   const [userSettings, setUserSettings] = useState<UserSettings>(loadUserSettings());
-  const [showClearDropdown, setShowClearDropdown] = useState(false);
   const pendingRequestsRef = useRef<Set<string>>(new Set()); // Track all pending request IDs across all agents
   const [hasPendingRequests, setHasPendingRequests] = useState(false); // State to trigger re-renders
   const [ragIndexingStatus, setRagIndexingStatus] = useState<string | null>(null); // RAG indexing status
+  const [selectedTools, setSelectedTools] = useState<string[]>([]); // Selected tools for the current conversation
+  const [showToolsDropdown, setShowToolsDropdown] = useState(false); // Show tools dropdown
+  const [globallyEnabledTools, setGloballyEnabledTools] = useState<string[]>([]); // Globally enabled MCP servers
+  const [selectedImage, setSelectedImage] = useState<{ data: string; mediaType: string; name: string } | null>(null); // Selected image for upload
   const requestTokenUsage = useRef<Map<string, { promptTokens: number; completionTokens?: number; totalTokens?: number; maxContext: number; usagePercent: number; timings?: any }>>(new Map());
   const panelRef = useRef<HTMLDivElement>(null);
+  const toolsDropdownRef = useRef<HTMLDivElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const previousMessagesLengthRef = useRef<number>(0);
   const isSwitchingAgentRef = useRef<boolean>(false);
@@ -347,7 +551,6 @@ const ChatPanel = forwardRef<ChatPanelRef, ChatPanelProps>(({ isOpen, onClose, s
   const messagesRef = useRef<ChatMessage[]>([]);
   const currentSessionIdRef = useRef<string | null>(null);
   const isWaitingForResponseRef = useRef<boolean>(false);
-  const clearDropdownRef = useRef<HTMLDivElement>(null);
   const requestIdToAgentIdRef = useRef<Map<string, string>>(new Map()); // Track which agent each request belongs to
   const focusTimeoutRef = useRef<NodeJS.Timeout | null>(null); // Track focus timeout to prevent loops
   const lastFocusTimeRef = useRef<number>(0); // Track last focus time to prevent rapid focus calls
@@ -496,16 +699,13 @@ const ChatPanel = forwardRef<ChatPanelRef, ChatPanelProps>(({ isOpen, onClose, s
         setMessages([]);
         setPromptText('');
         setCurrentSessionId(null);
+        setCurrentContextUsage(null);
         
         // Load chat history specific to this agent
         socket.emit('getAgentChatHistory', { projectPath: getProjectPathFromContext(selectedContext), agentId: agentId });
-      } else {
-        // Same agent/context, just update thinking tokens if needed
-        const currentThinkingTokens = thinkingTokens;
-        if (selectedAgent.contextSize !== currentThinkingTokens) {
-          setThinkingTokens(selectedAgent.contextSize);
-        }
       }
+      // Note: We don't update thinking tokens for same agent/context anymore to avoid loops
+      // Users can manually adjust if needed
       
       // Update refs
       previousAgentIdRef.current = agentId ?? null;
@@ -544,6 +744,7 @@ const ChatPanel = forwardRef<ChatPanelRef, ChatPanelProps>(({ isOpen, onClose, s
         setMessages([]);
         setPromptText('');
         setCurrentSessionId(null);
+        setCurrentContextUsage(null);
         isSwitchingAgentRef.current = false;
         previousAgentIdRef.current = null;
         previousContextRef.current = null;
@@ -563,6 +764,79 @@ const ChatPanel = forwardRef<ChatPanelRef, ChatPanelProps>(({ isOpen, onClose, s
       }
     }
   }, [width]);
+
+  // Close tools dropdown when clicking outside
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      if (showToolsDropdown && toolsDropdownRef.current && !toolsDropdownRef.current.contains(event.target as Node)) {
+        setShowToolsDropdown(false);
+      }
+    };
+
+    if (showToolsDropdown) {
+      document.addEventListener('mousedown', handleClickOutside);
+    }
+
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside);
+    };
+  }, [showToolsDropdown]);
+
+  // Fetch globally enabled MCP servers and tools
+  useEffect(() => {
+    socket.emit('getMCPServers');
+    socket.emit('getMCPTools');
+    
+    socket.on('mcpServers', (serverList: Array<{ name: string; enabled: boolean }>) => {
+      // Filter to only enabled servers
+      const enabled = serverList.filter(s => s.enabled).map(s => s.name);
+      console.log('MCP servers updated:', enabled);
+      // Set to server names initially, will be replaced by actual tools
+      setGloballyEnabledTools(enabled);
+    });
+    
+    // Listen for MCP tools updates (actual tool names from the gateway)
+    // This should only be used on initial load, not after each prompt execution
+    socket.on('mcpToolsUpdated', (toolNames: string[]) => {
+      console.log('MCP tools updated:', toolNames);
+      // Only update if we're getting a larger or initial list
+      // This prevents the list from shrinking when backend emits only used tools
+      setGloballyEnabledTools(prev => {
+        // If new list is larger, or we have no list yet, update it
+        if (!prev || prev.length === 0 || toolNames.length > prev.length) {
+          console.log('Updating tools list (larger or initial):', toolNames);
+          // Clear selected tools that are no longer available
+          setSelectedTools(prevSelected => 
+            prevSelected.filter(tool => toolNames.includes(tool))
+          );
+          return toolNames;
+        }
+        // Otherwise keep the existing list
+        console.log('Keeping existing tools list (new list is smaller)');
+        return prev;
+      });
+    });
+    
+    return () => {
+      socket.off('mcpServers');
+      socket.off('mcpToolsUpdated');
+    };
+  }, []);
+
+  // Initialize selected tools when agent changes - load from localStorage
+  useEffect(() => {
+    // Load previously selected tools for this agent from localStorage
+    const savedTools = loadSelectedTools(selectedAgent?.id);
+    setSelectedTools(savedTools);
+  }, [selectedAgent?.id]);
+
+  // Save selected tools to localStorage whenever they change
+  useEffect(() => {
+    // Only save if we have an agent selected
+    if (selectedAgent?.id) {
+      saveSelectedTools(selectedAgent.id, selectedTools);
+    }
+  }, [selectedTools, selectedAgent?.id]);
 
   // Save messages when chat window closes
   useEffect(() => {
@@ -808,11 +1082,52 @@ const ChatPanel = forwardRef<ChatPanelRef, ChatPanelProps>(({ isOpen, onClose, s
                   content: newContent,
                   isStreaming: true,
                   _isPlaceholder: false, // No longer a placeholder once we have content
+                  // Preserve contextUsage during streaming
+                  contextUsage: msg.contextUsage,
                 }
               : msg
           );
         } else {
-          // No existing message or placeholder found, create new message (fallback)
+          // No existing message or placeholder found
+          // Check if the last message is a tool call - if so, replace it
+          const lastMessage = prev[prev.length - 1];
+          
+          if (lastMessage && lastMessage.type === 'toolCall') {
+            // Replace the tool call message with streaming content
+            // Track response size
+            if (data.id) {
+              const currentSize = requestResponseSizesRef.current.get(data.id) || 0;
+              const chunkSize = new TextEncoder().encode(data.chunk).length;
+              requestResponseSizesRef.current.set(data.id, currentSize + chunkSize);
+              
+              // Track timing for first chunk (latency)
+              if (!firstChunkTimesRef.current.has(data.id)) {
+                firstChunkTimesRef.current.set(data.id, Date.now());
+                streamingStartTimesRef.current.set(data.id, Date.now());
+              }
+              // Update last chunk time (for answering duration)
+              lastChunkTimesRef.current.set(data.id, Date.now());
+            }
+            
+            return prev.map((msg, idx) =>
+              idx === prev.length - 1
+                ? {
+                    ...msg,
+                    id: data.id,
+                    type: 'response',
+                    content: data.chunk,
+                    toolName: undefined,
+                    isStreaming: true,
+                    _isPlaceholder: false,
+                    _isToolCallOnly: false,
+                    // Preserve contextUsage from the tool call message
+                    contextUsage: msg.contextUsage,
+                  }
+                : msg
+            );
+          }
+          
+          // Otherwise create new message (fallback)
           const newMessage: ChatMessage = {
             id: data.id,
             type: 'response',
@@ -1047,6 +1362,25 @@ const ChatPanel = forwardRef<ChatPanelRef, ChatPanelProps>(({ isOpen, onClose, s
             // Calculate confidence score
             const confidenceScore = calculateConfidenceScore(finalAnswer, tokenUsage);
             
+            // Parse tool calls from the accumulated content
+            const toolCalls = parseToolCalls(accumulatedContentForMetrics);
+            
+            // Build tool calls section - summarize by counting and grouping
+            let toolCallsSection = '';
+            if (toolCalls.length > 0) {
+              // Count tool calls by name
+              const toolCallCounts = new Map<string, number>();
+              toolCalls.forEach(toolCall => {
+                const count = toolCallCounts.get(toolCall.name) || 0;
+                toolCallCounts.set(toolCall.name, count + 1);
+              });
+              
+              toolCallsSection = `   Tool Calls: ${toolCalls.length} total\n`;
+              toolCallCounts.forEach((count, toolName) => {
+                toolCallsSection += `      ${toolName}${count > 1 ? ` (${count}x)` : ''}\n`;
+              });
+            }
+            
             // Send status message to terminal
             const statusMessage = `\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
               `Agent Response Status:\n` +
@@ -1058,6 +1392,7 @@ const ChatPanel = forwardRef<ChatPanelRef, ChatPanelProps>(({ isOpen, onClose, s
               `      Thinking: ${thinkingSizeColored}\n` +
               `      Answer: ${answerSizeColored}\n` +
               `${timingsSection}` +
+              `${toolCallsSection}` +
               `   Confidence: ${confidenceScore}%\n` +
               `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`;
             
@@ -1098,10 +1433,55 @@ const ChatPanel = forwardRef<ChatPanelRef, ChatPanelProps>(({ isOpen, onClose, s
         const placeholder = prev.find(msg => msg._isPlaceholder && msg._requestId === requestIdToFind);
         const targetMessage = existing || placeholder;
         
+        console.log('🔍 Looking for target message:', {
+          requestIdToFind,
+          foundExisting: !!existing,
+          existingContextUsage: existing?.contextUsage,
+          foundPlaceholder: !!placeholder,
+          placeholderContextUsage: placeholder?.contextUsage,
+          targetMessage: targetMessage ? {
+            id: targetMessage.id,
+            type: targetMessage.type,
+            hasContextUsage: !!targetMessage.contextUsage,
+            contextUsage: targetMessage.contextUsage
+          } : null
+        });
+        
         if (!targetMessage) {
           // No message found, create one (fallback)
-          // Even though response.content is empty (everything was streamed), parse it for consistency
+          // But first check if the last message is a tool call - if so, replace it
+          const lastMessage = prev[prev.length - 1];
           const finalAnswer = parseFinalAnswer(response.content || '');
+          
+          if (lastMessage && lastMessage.type === 'toolCall') {
+            // Look for placeholder with same requestId to get contextUsage
+            const placeholderWithContext = prev.find(m => 
+              m._isPlaceholder && m._requestId && 
+              (m._requestId === lastMessage._requestId || m._requestId === response.requestId)
+            );
+            const contextToUse = placeholderWithContext?.contextUsage || lastMessage.contextUsage;
+            
+            // Replace the tool call message with this response, preserving contextUsage
+            const replacedMessage: ChatMessage = {
+              ...lastMessage,
+              id: response.id,
+              type: 'response',
+              content: finalAnswer,
+              toolName: undefined,
+              isStreaming: false,
+              _isPlaceholder: false,
+              _isToolCallOnly: false,
+              // Preserve contextUsage from placeholder or lastMessage
+              contextUsage: contextToUse,
+            };
+            
+            return prev
+              .map((msg, idx) => idx === prev.length - 1 ? replacedMessage : msg)
+              // Remove placeholder after extracting contextUsage
+              .filter(msg => !(msg._isPlaceholder && msg._requestId === response.requestId));
+          }
+          
+          // Otherwise create a new message
           const responseMessage: ChatMessage = {
             id: response.id,
             type: 'response',
@@ -1114,28 +1494,92 @@ const ChatPanel = forwardRef<ChatPanelRef, ChatPanelProps>(({ isOpen, onClose, s
           return [...prev, responseMessage];
         }
         
-        // Remove placeholders when response completes
-        let filteredPrev = prev.filter(msg => !msg._isPlaceholder || msg.id === targetMessage.id);
+        // Remove placeholders when response completes, but keep the one with our requestId to extract contextUsage
+        // We need to filter out other placeholders but preserve contextUsage from our placeholder
+        let filteredPrev = prev.filter(msg => !msg._isPlaceholder || msg.id === targetMessage.id || msg._requestId === requestIdToFind);
         
         // Get the accumulated content from the message (it was streamed via chunks)
         // response.content is empty because everything was streamed
         const accumulatedContent = targetMessage.content || '';
         
+        // Check if this response is ONLY a tool call
+        const toolCallCheck = isOnlyToolCall(accumulatedContent);
+        
         // Parse the final answer from the accumulated content
         const finalAnswer = parseFinalAnswer(accumulatedContent);
         
+        // Preserve contextUsage from placeholder (which has it) even if targetMessage is the existing message
+        // Check both existing and placeholder for contextUsage
+        const contextUsageToPreserve = placeholder?.contextUsage || existing?.contextUsage || targetMessage.contextUsage;
+        console.log('💾 Context usage sources:', {
+          fromPlaceholder: placeholder?.contextUsage,
+          fromExisting: existing?.contextUsage,
+          fromTarget: targetMessage.contextUsage,
+          willPreserve: contextUsageToPreserve
+        });
+        
+        // If this is NOT a tool call, check if we should replace a previous tool call message
+        if (!toolCallCheck.isOnly) {
+          // Look for the most recent tool call message from this same request
+          const toolCallMessageIndex = filteredPrev.findIndex(msg => 
+            msg.type === 'toolCall' && msg._requestId === (targetMessage._requestId || requestIdToFind)
+          );
+          
+          // If we found a tool call message from the same request, replace it with this response
+          if (toolCallMessageIndex !== -1) {
+            // Replace the tool call message with the actual response
+            // Remove the target message if it's different from the tool call message
+            const messagesWithoutTarget = filteredPrev.filter((msg, idx) => 
+              !(msg.id === targetMessage.id && idx !== toolCallMessageIndex)
+            );
+            
+            return messagesWithoutTarget.map((msg, idx) =>
+              msg.type === 'toolCall' && msg._requestId === (targetMessage._requestId || requestIdToFind)
+                ? {
+                    ...msg,
+                    id: response.id,
+                    type: 'response',
+                    content: finalAnswer,
+                    toolName: undefined,
+                    isStreaming: false,
+                    _isPlaceholder: false,
+                    _isToolCallOnly: false,
+                    // Preserve contextUsage from placeholder, targetMessage, or msg (check all sources)
+                    contextUsage: contextUsageToPreserve || targetMessage.contextUsage || msg.contextUsage,
+                  }
+                : msg
+            );
+          }
+        }
+        
         // Update the message with parsed final answer
-        const updatedMessages = filteredPrev.map(msg =>
-          msg.id === targetMessage.id
-            ? { 
-                ...msg, 
-                id: response.id,
-                content: finalAnswer,
-                isStreaming: false,
-                _isPlaceholder: false,
-              }
-            : msg
-        );
+        const updatedMessages = filteredPrev.map(msg => {
+          if (msg.id === targetMessage.id) {
+            console.log('💾 Preserving contextUsage in final response:', contextUsageToPreserve);
+            const finalMessage: ChatMessage = { 
+              ...msg, 
+              id: response.id,
+              type: (toolCallCheck.isOnly ? 'toolCall' : msg.type) as 'response' | 'toolCall',
+              content: finalAnswer,
+              toolName: toolCallCheck.toolName,
+              isStreaming: false,
+              _isPlaceholder: false,
+              _isToolCallOnly: toolCallCheck.isOnly,
+              // Preserve contextUsage from placeholder or any available source
+              contextUsage: contextUsageToPreserve,
+            };
+            console.log('✨ Final message created:', {
+              id: finalMessage.id,
+              type: finalMessage.type,
+              hasContextUsage: !!finalMessage.contextUsage,
+              contextUsage: finalMessage.contextUsage
+            });
+            return finalMessage;
+          }
+          return msg;
+        })
+        // Remove any remaining placeholder messages for this request after we've extracted contextUsage
+        .filter(msg => !(msg._isPlaceholder && msg._requestId === requestIdToFind));
         
         // Calculate metrics and send status message to terminal
         // Use a small delay to allow tokenUsage event to arrive if it hasn't yet
@@ -1240,6 +1684,25 @@ const ChatPanel = forwardRef<ChatPanelRef, ChatPanelProps>(({ isOpen, onClose, s
               // Calculate confidence score
               const confidenceScore = calculateConfidenceScore(finalAnswer, tokenUsage);
               
+              // Parse tool calls from the accumulated content
+              const toolCalls = parseToolCalls(accumulatedContent);
+              
+              // Build tool calls section - summarize by counting and grouping
+              let toolCallsSection = '';
+              if (toolCalls.length > 0) {
+                // Count tool calls by name
+                const toolCallCounts = new Map<string, number>();
+                toolCalls.forEach(toolCall => {
+                  const count = toolCallCounts.get(toolCall.name) || 0;
+                  toolCallCounts.set(toolCall.name, count + 1);
+                });
+                
+                toolCallsSection = `   Tool Calls: ${toolCalls.length} total\n`;
+                toolCallCounts.forEach((count, toolName) => {
+                  toolCallsSection += `      ${toolName}${count > 1 ? ` (${count}x)` : ''}\n`;
+                });
+              }
+              
               // Send status message to terminal
               const statusMessage = `\n\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
                 `Agent Response Status:\n` +
@@ -1251,6 +1714,7 @@ const ChatPanel = forwardRef<ChatPanelRef, ChatPanelProps>(({ isOpen, onClose, s
                 `      Thinking: ${thinkingSizeColored}\n` +
                 `      Answer: ${answerSizeColored}\n` +
                 `${timingsSection}` +
+                `${toolCallsSection}` +
                 `   Confidence: ${confidenceScore}%\n` +
                 `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`;
               
@@ -1316,6 +1780,27 @@ const ChatPanel = forwardRef<ChatPanelRef, ChatPanelProps>(({ isOpen, onClose, s
     socket.on('chatError', (error: string) => {
       console.error('Chat error:', error);
       setIsWaitingForResponse(false);
+      
+      // Display error message to user in chat
+      setMessages(prev => {
+        // Remove any "Thinking..." placeholder for this request
+        const withoutPlaceholder = prev.filter(msg => 
+          !(msg._isPlaceholder && msg._requestId === currentRequestId)
+        );
+        
+        // Add error message
+        const errorMessage: ChatMessage = {
+          id: `error-${Date.now()}`,
+          type: 'response',
+          content: `**Error**\n\n${error}`,
+          expanded: false,
+          timestamp: new Date(),
+          agent: selectedAgent || null,
+          isStreaming: false,
+        };
+        
+        return [...withoutPlaceholder, errorMessage];
+      });
       
       // Clean up pending request tracking
       if (currentRequestId) {
@@ -1431,6 +1916,40 @@ const ChatPanel = forwardRef<ChatPanelRef, ChatPanelProps>(({ isOpen, onClose, s
           usagePercent: data.usagePercent,
           timings: data.timings,
         });
+        
+        // Update the current context usage display (only if changed to avoid loops)
+        setCurrentContextUsage(prev => {
+          // Only update if values have actually changed
+          if (!prev || 
+              prev.promptTokens !== data.promptTokens || 
+              prev.maxContext !== data.maxContext || 
+              prev.usagePercent !== data.usagePercent) {
+            return {
+              promptTokens: data.promptTokens,
+              maxContext: data.maxContext,
+              usagePercent: data.usagePercent,
+            };
+          }
+          return prev;
+        });
+        
+        // Update the message with context usage information
+        setMessages(prev => {
+          return prev.map(msg => {
+            // Match by requestId and include all response-like types
+            if (msg._requestId === requestId && (msg.type === 'response' || msg.type === 'toolCall' || msg._isPlaceholder)) {
+              return {
+                ...msg,
+                contextUsage: {
+                  promptTokens: data.promptTokens,
+                  maxContext: data.maxContext,
+                  usagePercent: data.usagePercent,
+                }
+              };
+            }
+            return msg;
+          });
+        });
       }
     });
 
@@ -1493,23 +2012,6 @@ const ChatPanel = forwardRef<ChatPanelRef, ChatPanelProps>(({ isOpen, onClose, s
     previousMessagesLengthRef.current = messages.length;
   }, [messages]);
 
-  // Close dropdown when clicking outside
-  useEffect(() => {
-    const handleClickOutside = (event: MouseEvent) => {
-      if (showClearDropdown && clearDropdownRef.current && !clearDropdownRef.current.contains(event.target as Node)) {
-        setShowClearDropdown(false);
-      }
-    };
-
-    if (showClearDropdown) {
-      document.addEventListener('mousedown', handleClickOutside);
-    }
-
-    return () => {
-      document.removeEventListener('mousedown', handleClickOutside);
-    };
-  }, [showClearDropdown]);
-
   const handleMouseDown = (e: React.MouseEvent) => {
     e.preventDefault();
     setIsResizing(true);
@@ -1524,30 +2026,13 @@ const ChatPanel = forwardRef<ChatPanelRef, ChatPanelProps>(({ isOpen, onClose, s
     setMessages([]);
     setPromptText('');
     setCurrentSessionId(null);
+    setCurrentContextUsage(null);
   };
 
-  const handleClear = () => {
-    if (!selectedAgent) return;
-    
-    // Clear current chat messages
-    setMessages([]);
-    setPromptText('');
-    setCurrentSessionId(null);
-    
-    // Clear the current agent's terminal tab (this will clear the thinking logs)
-    if (onClearAgentTab && selectedAgent) {
-      onClearAgentTab(selectedAgent.id);
-    }
-    
-    // Clear agent's chat history on server
-    socket.emit('clearAgentChatHistory', { 
-      projectPath: getProjectPathFromContext(selectedContext), 
-      agentId: selectedAgent.id 
-    });
-    
-    // Clear chat history from state
-    setChatHistory([]);
-    setShowClearDropdown(false);
+  const handleToggleExpand = () => {
+    const newExpandedState = !isExpanded;
+    setIsExpanded(newExpandedState);
+    saveChatPanelExpanded(newExpandedState);
   };
 
   const handleClearAll = () => {
@@ -1568,20 +2053,65 @@ const ChatPanel = forwardRef<ChatPanelRef, ChatPanelProps>(({ isOpen, onClose, s
     setMessages([]);
     setPromptText('');
     setCurrentSessionId(null);
+    setCurrentContextUsage(null);
+    setSelectedImage(null);
     
     // Clear chat history from state
     setChatHistory([]);
-    setShowClearDropdown(false);
+  };
+
+  // Handle image selection
+  const handleImageSelect = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    // Validate file type
+    const validTypes = ['image/jpeg', 'image/png', 'image/gif', 'image/webp'];
+    if (!validTypes.includes(file.type)) {
+      alert('Please select a valid image file (JPEG, PNG, GIF, or WebP)');
+      return;
+    }
+
+    // Validate file size (max 5MB)
+    const maxSize = 5 * 1024 * 1024; // 5MB in bytes
+    if (file.size > maxSize) {
+      alert('Image file size must be less than 5MB');
+      return;
+    }
+
+    // Convert to base64
+    const reader = new FileReader();
+    reader.onloadend = () => {
+      const base64String = reader.result as string;
+      // Remove the data URL prefix (e.g., "data:image/png;base64,")
+      const base64Data = base64String.split(',')[1];
+      
+      setSelectedImage({
+        data: base64Data,
+        mediaType: file.type,
+        name: file.name
+      });
+    };
+    reader.readAsDataURL(file);
+  };
+
+  // Remove selected image
+  const handleRemoveImage = () => {
+    setSelectedImage(null);
   };
 
   const handleSend = () => {
-    if (!promptText.trim() || !selectedAgent || hasPendingRequests) return;
+    if ((!promptText.trim() && !selectedImage) || !selectedAgent || hasPendingRequests) return;
     
     // Add prompt to messages
+    const messageContent = selectedImage 
+      ? (promptText.trim() ? `[Image]\n${promptText}` : '[Image attached]')
+      : promptText;
+    
     const newMessage: ChatMessage = {
       id: Date.now().toString(),
       type: 'prompt',
-      content: promptText,
+      content: messageContent,
       expanded: false,
       timestamp: new Date(),
       _requestId: undefined, // Will be set below
@@ -1636,6 +2166,15 @@ const ChatPanel = forwardRef<ChatPanelRef, ChatPanelProps>(({ isOpen, onClose, s
         content: msg.content
       }));
     
+    // Log image data for debugging
+    if (selectedImage) {
+      console.log('[IMAGE] Sending image with request:', {
+        mediaType: selectedImage.mediaType,
+        dataLength: selectedImage.data.length,
+        fileName: selectedImage.name
+      });
+    }
+    
     // Send to AI via socket
     socket.emit('sendChatPrompt', {
       requestId,
@@ -1646,8 +2185,7 @@ const ChatPanel = forwardRef<ChatPanelRef, ChatPanelProps>(({ isOpen, onClose, s
       projectPath: selectedAgent?.enabledAttributes?.includes('Project Path') ? getProjectPathFromContext(selectedContext) : null,
       containerId: selectedContext?.type === 'container' ? selectedContext.id : null,
       agentId: selectedAgent?.id,
-      agentTools: selectedAgent?.enabledTools || [],
-      agentPrivilegedTools: selectedAgent?.privilegedTools || [],
+      requestedTools: selectedTools, // Tools selected by user for this conversation
       agentName: selectedAgent?.enabledAttributes?.includes('Agent Name') ? selectedAgent.name : null,
       agentNickname: selectedAgent?.enabledAttributes?.includes('Agent Nickname') ? selectedAgent.nickname : null,
       agentJobTitle: selectedAgent?.enabledAttributes?.includes('Agent Job Title') ? selectedAgent.jobTitle : null,
@@ -1667,7 +2205,14 @@ const ChatPanel = forwardRef<ChatPanelRef, ChatPanelProps>(({ isOpen, onClose, s
       userCountry: selectedAgent?.enabledAttributes?.includes('User Country') && userSettings.country ? userSettings.country : null,
       userState: selectedAgent?.enabledAttributes?.includes('User State') && userSettings.state ? userSettings.state : null,
       userZipcode: selectedAgent?.enabledAttributes?.includes('User Zipcode') && userSettings.zipcode ? userSettings.zipcode : null,
+      image: selectedImage ? {
+        data: selectedImage.data,
+        mediaType: selectedImage.mediaType
+      } : null,
     });
+    
+    // Clear the selected image after sending
+    setSelectedImage(null);
   };
 
   const handleAbort = (requestId: string) => {
@@ -1690,20 +2235,30 @@ const ChatPanel = forwardRef<ChatPanelRef, ChatPanelProps>(({ isOpen, onClose, s
     }
   };
 
-  const loadChatSession = (session: ChatSession) => {
-    setMessages(session.messages);
-    setCurrentSessionId(session.id);
-    setViewMode('chat');
+  // Get available tools (globally enabled MCP servers)
+  const getAvailableTools = (): string[] => {
+    return globallyEnabledTools;
   };
 
-  const deleteChatSession = (sessionId: string) => {
-    if (!selectedAgent) return;
-    
-    socket.emit('deleteAgentChatSession', { 
-      projectPath: getProjectPathFromContext(selectedContext), 
-      agentId: selectedAgent.id,
-      sessionId 
-    });
+  // Toggle a specific tool
+  const toggleTool = (tool: string) => {
+    setSelectedTools(prev => 
+      prev.includes(tool) 
+        ? prev.filter(t => t !== tool)
+        : [...prev, tool]
+    );
+  };
+
+  // Toggle all tools on/off
+  const toggleAllTools = () => {
+    const availableTools = getAvailableTools();
+    if (selectedTools.length === availableTools.length) {
+      // All selected, deselect all
+      setSelectedTools([]);
+    } else {
+      // Not all selected, select all
+      setSelectedTools(availableTools);
+    }
   };
 
   const handleThinkingClick = (agentId: string | undefined, agentName: string | undefined) => {
@@ -1727,10 +2282,13 @@ const ChatPanel = forwardRef<ChatPanelRef, ChatPanelProps>(({ isOpen, onClose, s
   return (
     <div 
       ref={panelRef}
-      className={`chat-panel ${isOpen ? 'open' : ''}`}
+      className={`chat-panel ${isOpen ? 'open' : ''} ${isExpanded ? 'expanded' : ''}`}
       style={{ 
-        width: isOpen ? `${width}px` : '0',
-        height: '100%'
+        width: isOpen ? (isExpanded ? '100%' : `${width}px`) : '0',
+        height: '100%',
+        ...(isExpanded && {
+          bottom: `${terminalHeight + 40}px`, // Terminal height + terminal header height
+        })
       }}
     >
       <div 
@@ -1747,7 +2305,7 @@ const ChatPanel = forwardRef<ChatPanelRef, ChatPanelProps>(({ isOpen, onClose, s
                   {selectedAgent.avatar ? (
                     <img src={selectedAgent.avatar} alt={selectedAgent.name} className="w-full h-full object-cover" />
                   ) : (
-                    <span className="text-lg">🤖</span>
+                    <CpuChipIcon className="w-6 h-6 text-gray-400" />
                   )}
                 </div>
                 <div className="flex flex-col">
@@ -1765,53 +2323,18 @@ const ChatPanel = forwardRef<ChatPanelRef, ChatPanelProps>(({ isOpen, onClose, s
           </div>
           <div className="header-buttons">
             <button 
-              onClick={handleNewChat}
-              title="New Chat"
-              className="new-chat-button"
+              className="expand-button" 
+              onClick={handleToggleExpand} 
+              title={isExpanded ? "Collapse" : "Expand"}
             >
-              New
+              {isExpanded ? "⇱" : "⤢"}
             </button>
-            <button 
-              onClick={() => setViewMode(viewMode === 'chat' ? 'history' : 'chat')}
-              className={viewMode === 'history' ? 'active' : ''}
-              title="Chat History"
-            >
-              History
-            </button>
-            <div className="relative" ref={clearDropdownRef}>
-              <button 
-                onClick={() => setShowClearDropdown(!showClearDropdown)}
-                title="Clear Chat and Agent Terminals"
-                className="clear-button"
-              >
-                Clear {showClearDropdown ? '▲' : '▼'}
-              </button>
-              {showClearDropdown && (
-                <div className="absolute right-0 mt-1 bg-white border border-gray-300 rounded-lg shadow-lg z-50 min-w-[160px]">
-                  <button
-                    onClick={handleClear}
-                    className="block w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-gray-100 first:rounded-t-lg"
-                    disabled={!selectedAgent}
-                  >
-                    Clear Current
-                  </button>
-                  <button
-                    onClick={handleClearAll}
-                    className="block w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-gray-100 last:rounded-b-lg"
-                  >
-                    Clear All
-                  </button>
-                </div>
-              )}
-            </div>
             <button className="close-button" onClick={onClose} title="Close">×</button>
           </div>
         </div>
 
-        {viewMode === 'chat' ? (
-          <>
-            {/* Chat Response Area */}
-            <div className="chat-messages">
+        {/* Chat Response Area */}
+        <div className="chat-messages">
               {messages.length === 0 ? (
                 <p className="empty-state">Start a conversation with {selectedAgent?.nickname || selectedAgent?.name || 'your AI assistant'}...</p>
               ) : (
@@ -1819,23 +2342,25 @@ const ChatPanel = forwardRef<ChatPanelRef, ChatPanelProps>(({ isOpen, onClose, s
                   .filter(msg => !msg.content.includes('Starting MCP gateway'))
                   .map(msg => (
                     <div key={msg.id} className={`message ${msg.type}`}>
-                      {(msg.type === 'response' || msg.type === 'toolResult') && msg.agent && (
+                      {(msg.type === 'response' || msg.type === 'toolResult' || msg.type === 'toolCall') && msg.agent && (
                         <div className="message-agent-header">
-                          <div className="message-agent-avatar">
-                            {msg.agent.avatar ? (
-                              <img src={msg.agent.avatar} alt={msg.agent.name} />
-                            ) : (
-                              <span>🤖</span>
-                            )}
-                          </div>
-                          <div className="message-agent-name">
-                            {msg.agent.name}
-                            {msg.agent.jobTitle && (
-                              <span className="message-agent-title"> • {msg.agent.jobTitle}</span>
-                            )}
-                            {msg.type === 'toolResult' && msg.toolName && (
-                              <span className="message-tool-name"> • {msg.toolName}</span>
-                            )}
+                          <div className="message-agent-header-left">
+                            <div className="message-agent-avatar">
+                              {msg.agent.avatar ? (
+                                <img src={msg.agent.avatar} alt={msg.agent.name} />
+                              ) : (
+                                <CpuChipIcon className="w-full h-full text-gray-400" />
+                              )}
+                            </div>
+                            <div className="message-agent-name">
+                              {msg.agent.name}
+                              {msg.agent.jobTitle && (
+                                <span className="message-agent-title"> • {msg.agent.jobTitle}</span>
+                              )}
+                              {msg.type === 'toolResult' && msg.toolName && (
+                                <span className="message-tool-name"> • {msg.toolName}</span>
+                              )}
+                            </div>
                           </div>
                         </div>
                       )}
@@ -1855,46 +2380,41 @@ const ChatPanel = forwardRef<ChatPanelRef, ChatPanelProps>(({ isOpen, onClose, s
                             {userProfile.avatar ? (
                               <img src={userProfile.avatar} alt={userProfile.name} />
                             ) : (
-                              <span>👤</span>
+                              <UserIcon className="w-full h-full text-gray-400" />
                             )}
                           </div>
                         </div>
                       )}
                       <div className="message-content">
-                        {msg.type === 'toolResult' ? (
+                        {msg.type === 'toolCall' ? (
+                          // Tool call message - show "Calling tool: <tool-name>..."
+                          <div className="thinking-indicator-container">
+                            <div 
+                              className="thinking-indicator"
+                              style={{ cursor: 'default' }}
+                            >
+                              Calling tool: {msg.toolName}...
+                            </div>
+                          </div>
+                        ) : msg.type === 'toolResult' ? (
                           // Tool result message - display JSON data
                           <div className="tool-result-section">
                             <JSONExplorer data={msg.toolResult} />
                           </div>
                         ) : msg.isStreaming && !msg.content ? (
                           // Show "Thinking..." when streaming and no content yet
-                          <div className="thinking-indicator-container">
-                            <div 
-                              className="thinking-indicator clickable"
-                              onClick={() => handleThinkingClick(msg.agent?.id, msg.agent?.name)}
-                              style={{ cursor: msg.agent ? 'pointer' : 'default' }}
-                            >
-                              Thinking...
-                              {msg.agent && (
-                                <span className="thinking-hint"> (Click to view in terminal)</span>
-                              )}
-                            </div>
-                            {msg._requestId && (
-                              <button
-                                className="abort-thinking-btn"
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  handleAbort(msg._requestId!);
-                                }}
-                                title="Abort this request"
-                              >
-                                Abort
-                              </button>
+                          <div className="thinking-indicator clickable"
+                            onClick={() => handleThinkingClick(msg.agent?.id, msg.agent?.name)}
+                            style={{ cursor: msg.agent ? 'pointer' : 'default' }}
+                          >
+                            Thinking...
+                            {msg.agent && (
+                              <span className="thinking-hint"> (Click to view in terminal)</span>
                             )}
                           </div>
                         ) : (
                           // Regular message (prompt or response)
-                          <MessageRenderer content={msg.content} isStreaming={msg.isStreaming || false} />
+                          <MessageRenderer content={replaceToolCallsInContent(msg.content)} isStreaming={msg.isStreaming || false} />
                         )}
                       </div>
                     </div>
@@ -1905,6 +2425,37 @@ const ChatPanel = forwardRef<ChatPanelRef, ChatPanelProps>(({ isOpen, onClose, s
 
             {/* Chat Prompt Section */}
             <div className="chat-prompt-section">
+              {/* Context Size Control */}
+              {selectedAgent && (
+                <div className="context-size-control">
+                  <label>
+                    <span className="context-label">Thinking Tokens</span>
+                    <span className="context-usage">
+                      {currentContextUsage 
+                        ? `used ${currentContextUsage.promptTokens.toLocaleString()} of ${thinkingTokens.toLocaleString()} available`
+                        : `${thinkingTokens.toLocaleString()} available`
+                      }
+                    </span>
+                  </label>
+                  <div className="context-slider-row">
+                    <input
+                      type="range"
+                      min="1024"
+                      max="131072"
+                      step="1024"
+                      value={thinkingTokens}
+                      onChange={(e) => setThinkingTokens(parseInt(e.target.value, 10))}
+                      className="context-slider"
+                    />
+                    <div className="context-usage-display">
+                      <CircleProgress percentage={currentContextUsage?.usagePercent ?? 0} size={32} />
+                      <span className="context-usage-text">
+                        {currentContextUsage ? Math.round(currentContextUsage.usagePercent) : 0}%
+                      </span>
+                    </div>
+                  </div>
+                </div>
+              )}
               {/* Prompt Input */}
               <div className="prompt-input">
                 <textarea 
@@ -1922,54 +2473,126 @@ const ChatPanel = forwardRef<ChatPanelRef, ChatPanelProps>(({ isOpen, onClose, s
                     </div>
                   )}
                   <button 
-                    className="send-btn"
-                    onClick={handleSend}
-                    disabled={!promptText.trim() || hasPendingRequests}
-                    title={hasPendingRequests ? 'Please wait for responses to complete' : 'Send message'}
+                    onClick={handleClearAll}
+                    title="Clear all chat history and agent terminals"
+                    className="clear-button"
                   >
-                    Send
+                    Clear History
+                  </button>
+                  {/* Tools Dropdown - only show if agent has tools */}
+                  {getAvailableTools().length > 0 && (
+                    <div className="tools-dropdown-container" ref={toolsDropdownRef}>
+                      <button
+                        className="tools-dropdown-btn"
+                        onClick={() => setShowToolsDropdown(!showToolsDropdown)}
+                        title="Select tools for this conversation"
+                      >
+                        <WrenchScrewdriverIcon className="w-4 h-4 inline mr-1" />
+                        Tools ({selectedTools.length}/{getAvailableTools().length})
+                      </button>
+                      {showToolsDropdown && (
+                        <div className="tools-dropdown-menu">
+                          <div className="tools-dropdown-header">
+                            <label className="tools-toggle-all">
+                              <input
+                                type="checkbox"
+                                checked={selectedTools.length === getAvailableTools().length}
+                                onChange={toggleAllTools}
+                              />
+                              <span>All Tools</span>
+                            </label>
+                          </div>
+                          <div className="tools-list">
+                            {getAvailableTools().map(tool => (
+                              <label key={tool} className="tool-item">
+                                <input
+                                  type="checkbox"
+                                  checked={selectedTools.includes(tool)}
+                                  onChange={() => toggleTool(tool)}
+                                />
+                                <span>{tool}</span>
+                              </label>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                  {/* Image Upload Button */}
+                  {selectedImage ? (
+                    <div className="image-preview-container">
+                      <span className="image-preview-name" title={selectedImage.name}>
+                        <PhotoIcon className="w-4 h-4 inline-block mr-1" /> Image
+                      </span>
+                      <div
+                        className="remove-image-btn clickable"
+                        onClick={handleRemoveImage}
+                        title="Remove image"
+                      >
+                        ✕
+                      </div>
+                    </div>
+                  ) : (
+                    <label className="image-upload-btn" title="Upload image">
+                      <input
+                        type="file"
+                        accept="image/jpeg,image/png,image/gif,image/webp"
+                        onChange={handleImageSelect}
+                        style={{ display: 'none' }}
+                      />
+                      <PhotoIcon className="w-4 h-4 inline-block mr-1" /> Image
+                    </label>
+                  )}
+                  <button 
+                    className={hasPendingRequests ? "abort-btn" : "send-btn"}
+                    onClick={() => {
+                      if (hasPendingRequests && currentRequestId) {
+                        handleAbort(currentRequestId);
+                      } else {
+                        handleSend();
+                      }
+                    }}
+                    disabled={!hasPendingRequests && !promptText.trim() && !selectedImage}
+                    title={hasPendingRequests ? 'Abort current request' : 'Send message'}
+                  >
+                    {hasPendingRequests ? 'Abort' : 'Send'}
                   </button>
                 </div>
               </div>
             </div>
-          </>
-        ) : (
-          /* Chat History View */
-          <div className="chat-history">
-            <div className="history-list">
-              {chatHistory.length === 0 ? (
-                <p className="empty-state">No chat history yet...</p>
-              ) : (
-                chatHistory.map(session => (
-                  <div key={session.id} className="history-item">
-                    <div className="history-item-header" onClick={() => loadChatSession(session)}>
-                      <h4>{session.title}</h4>
-                      {session.isProcessing && <span className="processing-badge">Processing</span>}
-                    </div>
-                    <div className="history-item-meta">
-                      <span>Tokens: {session.tokensUsed}</span>
-                      <span>Lines Changed: {session.changedLines}</span>
-                      <span>{new Date(session.lastUpdated).toLocaleDateString()}</span>
-                    </div>
-                    <button 
-                      className="delete-session-btn"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        deleteChatSession(session.id);
-                      }}
-                    >
-                      Delete
-                    </button>
-                  </div>
-                ))
-              )}
-            </div>
-          </div>
-        )}
       </div>
     </div>
   );
 });
 
-export default ChatPanel;
+ChatPanel.displayName = 'ChatPanel';
+
+export default React.memo(ChatPanel, (prevProps, nextProps) => {
+  // Custom comparison to prevent unnecessary re-renders
+  // Compare arrays by length and first element ID
+  const agentsChanged = prevProps.agents?.length !== nextProps.agents?.length ||
+    prevProps.agents?.[0]?.id !== nextProps.agents?.[0]?.id;
+  
+  const propsChanged = 
+    prevProps.isOpen !== nextProps.isOpen ||
+    prevProps.selectedAgent?.id !== nextProps.selectedAgent?.id ||
+    prevProps.terminalHeight !== nextProps.terminalHeight ||
+    prevProps.selectedContext !== nextProps.selectedContext ||
+    prevProps.userProfile?.email !== nextProps.userProfile?.email ||
+    agentsChanged;
+  
+  if (propsChanged) {
+    console.log('ChatPanel props changed:', {
+      isOpen: prevProps.isOpen !== nextProps.isOpen,
+      selectedAgent: prevProps.selectedAgent?.id !== nextProps.selectedAgent?.id,
+      terminalHeight: prevProps.terminalHeight !== nextProps.terminalHeight,
+      selectedContext: prevProps.selectedContext !== nextProps.selectedContext,
+      userProfile: prevProps.userProfile?.email !== nextProps.userProfile?.email,
+      agents: agentsChanged,
+    });
+  }
+  
+  // Return true to skip re-render, false to allow re-render
+  return !propsChanged;
+});
 

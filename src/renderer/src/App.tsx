@@ -17,6 +17,26 @@ import Terminal, { TerminalRef } from './components/Terminal';
 import ContainerEditor, { ContainerEditorRef } from './components/ContainerEditor';
 import CommandPalette from './components/CommandPalette';
 import QuickOpen from './components/QuickOpen';
+import {
+  FolderIcon,
+  CommandLineIcon,
+  CpuChipIcon,
+  WrenchScrewdriverIcon,
+  UsersIcon,
+  CubeIcon,
+  ServerStackIcon,
+  RocketLaunchIcon,
+  GlobeAltIcon,
+  CircleStackIcon,
+  Cog6ToothIcon,
+  DocumentTextIcon,
+  ChatBubbleLeftRightIcon,
+  ComputerDesktopIcon,
+  Bars3Icon,
+  ArrowPathIcon,
+  StopIcon,
+  UserIcon,
+} from '@heroicons/react/24/outline';
 
 const socket = io('http://localhost:3002');
 const SELECTED_CONTEXT_KEY = 'selectedContext';
@@ -289,6 +309,20 @@ function App() {
     };
   }, []);
 
+  // Listen for container not found errors (stale/deleted containers)
+  useEffect(() => {
+    socket.on('containerNotFound', (data: { containerId: string }) => {
+      // Check if the not-found container is our currently selected context
+      if (selectedContext?.type === 'container' && selectedContext.id === data.containerId) {
+        console.log(`Selected container ${data.containerId.substring(0, 12)} no longer exists - clearing selection`);
+        setSelectedContext(null);
+      }
+    });
+    return () => {
+      socket.off('containerNotFound');
+    };
+  }, [selectedContext]);
+
   // Listen for projects updates
   useEffect(() => {
     socket.on('projects', (data: Array<{ path: string; exists: boolean }>) => {
@@ -546,7 +580,7 @@ function App() {
       id: 'toggle-chat',
       label: 'Toggle Chat',
       description: 'Open or close the chat panel',
-      icon: '💬',
+      icon: ChatBubbleLeftRightIcon,
       action: () => {
         if (selectedAgent) {
           toggleChat();
@@ -557,49 +591,49 @@ function App() {
       id: 'toggle-terminal',
       label: 'Toggle Terminal',
       description: 'Open or close the terminal',
-      icon: '💻',
+      icon: ComputerDesktopIcon,
       action: () => toggleTerminal(),
     },
     {
       id: 'toggle-sidebar',
       label: 'Toggle Sidebar',
       description: 'Collapse or expand the sidebar',
-      icon: '📋',
+      icon: Bars3Icon,
       action: () => setIsSidebarCollapsed(!isSidebarCollapsed),
     },
     {
       id: 'open-projects',
       label: 'Open Projects',
       description: 'Navigate to Projects view',
-      icon: '📁',
+      icon: FolderIcon,
       action: () => setCurrentView('projects'),
     },
     {
       id: 'open-containers',
       label: 'Open Containers',
       description: 'Navigate to Containers view',
-      icon: '🐳',
+      icon: ServerStackIcon,
       action: () => setCurrentView('containers'),
     },
     {
       id: 'open-images',
       label: 'Open Images',
       description: 'Navigate to Images view',
-      icon: '📦',
+      icon: CubeIcon,
       action: () => setCurrentView('images'),
     },
     {
       id: 'open-agents',
       label: 'Open Agents',
       description: 'Navigate to Agents view',
-      icon: '👥',
+      icon: UsersIcon,
       action: () => setCurrentView('agents'),
     },
     {
       id: 'open-settings',
       label: 'Open Settings',
       description: 'Navigate to Settings view',
-      icon: '⚙️',
+      icon: Cog6ToothIcon,
       action: () => setCurrentView('settings'),
     },
   ];
@@ -617,19 +651,19 @@ function App() {
   };
 
   const navItems = [
-    { id: 'projects' as ViewType, label: 'Projects', icon: '📁' },
-    { id: 'executables' as ViewType, label: 'Executables', icon: '⚙️' },
-    { id: 'models' as ViewType, label: 'AI Models', icon: '🤖' },
-    { id: 'tools' as ViewType, label: 'AI Tools', icon: '🔧' },
-    { id: 'agents' as ViewType, label: 'Agents', icon: '👥' },
-    { id: 'images' as ViewType, label: 'Images', icon: '📦' },
-    { id: 'containers' as ViewType, label: 'Containers', icon: '🐳' },
-    { id: 'devEnvironments' as ViewType, label: 'Dev Environments', icon: '🚀' },
-    { id: 'networks' as ViewType, label: 'Networks', icon: '🌐' },
-    { id: 'volumes' as ViewType, label: 'Volumes', icon: '💾' },
-    { id: 'settings' as ViewType, label: 'Settings', icon: '⚙️' },
+    { id: 'projects' as ViewType, label: 'Projects', icon: FolderIcon },
+    { id: 'executables' as ViewType, label: 'Executables', icon: CommandLineIcon },
+    { id: 'models' as ViewType, label: 'AI Models', icon: CpuChipIcon },
+    { id: 'tools' as ViewType, label: 'AI Tools', icon: WrenchScrewdriverIcon },
+    { id: 'agents' as ViewType, label: 'Agents', icon: UsersIcon },
+    { id: 'images' as ViewType, label: 'Images', icon: CubeIcon },
+    { id: 'containers' as ViewType, label: 'Containers', icon: ServerStackIcon },
+    { id: 'devEnvironments' as ViewType, label: 'Dev Environments', icon: RocketLaunchIcon },
+    { id: 'networks' as ViewType, label: 'Networks', icon: GlobeAltIcon },
+    { id: 'volumes' as ViewType, label: 'Volumes', icon: CircleStackIcon },
+    { id: 'settings' as ViewType, label: 'Settings', icon: Cog6ToothIcon },
     // Conditionally add editor button when editor is open
-    ...(editingContainer ? [{ id: 'editor' as ViewType, label: 'Editor', icon: '📝' }] : []),
+    ...(editingContainer ? [{ id: 'editor' as ViewType, label: 'Editor', icon: DocumentTextIcon }] : []),
   ];
 
   return (
@@ -657,7 +691,7 @@ function App() {
                     className="w-full h-full object-cover" 
                   />
                 ) : (
-                  <span className="text-lg">🤖</span>
+                  <CpuChipIcon className="w-6 h-6 text-gray-400" />
                 )}
               </button>
             )}
@@ -718,7 +752,7 @@ function App() {
                       .filter(c => c.State === 'running')
                       .map(container => (
                         <option key={container.Id} value={container.Id}>
-                          🐳 {container.Names[0]?.replace(/^\//, '') || container.Id.substring(0, 12)}
+                          {container.Names[0]?.replace(/^\//, '') || container.Id.substring(0, 12)}
                         </option>
                       ))}
                   </select>
@@ -741,14 +775,24 @@ function App() {
                         }
                       }
                     }}
-                    className={`px-3 py-2 border border-gray-600 rounded-lg text-sm font-medium transition-colors ${
+                    className={`px-3 py-2 border border-gray-600 rounded-lg text-sm font-medium transition-colors flex items-center space-x-1 ${
                       isRAGIndexing
                         ? 'bg-red-600 text-white hover:bg-red-700'
                         : 'bg-gray-700 text-gray-200 hover:bg-gray-600'
                     } focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent`}
                     title={isRAGIndexing ? 'Abort RAG indexing' : 'Refresh RAG context'}
                   >
-                    {isRAGIndexing ? '⏹️ Abort' : '🔄 Refresh'}
+                    {isRAGIndexing ? (
+                      <>
+                        <StopIcon className="w-4 h-4" />
+                        <span>Abort</span>
+                      </>
+                    ) : (
+                      <>
+                        <ArrowPathIcon className="w-4 h-4" />
+                        <span>Refresh</span>
+                      </>
+                    )}
                   </button>
                 )}
               </div>
@@ -768,7 +812,7 @@ function App() {
                 {userProfile.avatar ? (
                   <img src={userProfile.avatar} alt={userProfile.name} className="w-full h-full object-cover" />
                 ) : (
-                  <span className="text-lg">👤</span>
+                  <UserIcon className="w-6 h-6 text-gray-400" />
                 )}
               </div>
             </div>
@@ -814,8 +858,9 @@ function App() {
             </div>
 
             {/* Navigation */}
-            <nav className="flex-1 p-4 space-y-1 overflow-y-auto">
+            <nav className="flex-1 p-2 space-y-2 overflow-y-auto">
               {navItems.map((item) => {
+                const IconComponent = item.icon;
                 return (
                   <div key={item.id}>
                     <button
@@ -829,7 +874,7 @@ function App() {
                       }`}
                       title={isSidebarCollapsed ? item.label : ''}
                     >
-                      <span className="text-2xl">{item.icon}</span>
+                      <IconComponent className="w-6 h-6" />
                       {!isSidebarCollapsed && (
                         <span className="font-medium">{item.label}</span>
                       )}

@@ -338,21 +338,21 @@ app.whenReady().then(async () => {
       const stats = ragService.getStats();
       
       if (isInit && stats) {
-        console.log('✅ RAG service initialized successfully - database is ready');
+        console.log('[✓] RAG service initialized successfully - database is ready');
         console.log('RAG stats:', JSON.stringify(stats, null, 2));
       } else {
-        console.warn('⚠️ RAG service initialization may have failed');
+        console.warn('[!] RAG service initialization may have failed');
         console.warn('Is initialized:', isInit);
         console.warn('Stats available:', stats !== null);
         
         if (!isInit) {
-          console.error('❌ Database connection failed - RAG will not work');
+          console.error('[ERROR] Database connection failed - RAG will not work');
           console.error('Check logs above for initialization errors');
         }
       }
     })
     .catch((error: any) => {
-      console.error('❌ Exception during RAG service initialization:', error);
+      console.error('[ERROR] Exception during RAG service initialization:', error);
       console.error('Error message:', error?.message);
       console.error('Error stack:', error?.stack);
     });
@@ -919,8 +919,16 @@ app.whenReady().then(async () => {
         // Emit response immediately to avoid blocking UI
         socket.emit('containerWorkingDir', { containerId, workingDir });
       } catch (error: any) {
-        console.error(`Error getting container working directory for ${containerId}:`, error);
-        socket.emit('containerWorkingDir', { containerId, workingDir: '/' });
+        // Check if container doesn't exist (404)
+        if (error.statusCode === 404 || error.reason === 'no such container') {
+          // Container was deleted - emit error so frontend can clear the selection
+          console.log(`Container ${containerId.substring(0, 12)} no longer exists (deleted or removed)`);
+          socket.emit('containerNotFound', { containerId });
+        } else {
+          // Other error - still return default working directory
+          console.error(`Error getting container working directory for ${containerId}:`, error);
+          socket.emit('containerWorkingDir', { containerId, workingDir: '/' });
+        }
       }
     });
 
@@ -1058,11 +1066,11 @@ app.whenReady().then(async () => {
                 }
               })
                 .then((fileCount) => {
-                  console.log(`✅ Indexed ${fileCount} files from project filesystem`);
+                  console.log(`[✓] Indexed ${fileCount} files from project filesystem`);
                   return ragService.indexGitHubRepoInfo(newProjectPath);
                 })
                 .then(() => {
-                  console.log('✅ Indexed GitHub repository information');
+                  console.log('[✓] Indexed GitHub repository information');
                 })
                 .catch((indexError) => {
                   console.error('Error indexing project files:', indexError);
@@ -1427,22 +1435,15 @@ app.whenReady().then(async () => {
 
     // Copy any executables from the project bin folder to userData bin (for initial setup)
     const projectBinPath = path.join(process.cwd(), 'bin');
-    if (fs.existsSync(projectBinPath) && fs.lstatSync(projectBinPath).isDirectory()) {
-      try {
-        const projectExecutables = fs.readdirSync(projectBinPath);
-        projectExecutables.forEach(file => {
-          const srcPath = path.join(projectBinPath, file);
-          const destPath = path.join(binPath, file);
-          // Only copy if the file doesn't already exist in userData bin
-          if (!fs.existsSync(destPath)) {
-            fs.copyFileSync(srcPath, destPath);
-            fs.chmodSync(destPath, '755');
-          }
-        });
-      } catch (error) {
-        console.error('Error copying project executables to userData:', error);
-      }
-    }
+    
+    // List of system binaries
+    const FORBIDDEN_BINARIES = [
+      'ls', 'cat', 'rm', 'cp', 'mv', 'mkdir', 'rmdir', 'pwd', 'echo', 'sh', 'bash', 'zsh',
+      'chmod', 'kill', 'ps', 'date', 'df', 'dd', 'ln', 'test', '[', 'sleep', 'hostname',
+      'sync', 'stty', 'ed', 'expr', 'link', 'unlink', 'pax', 'csh', 'ksh', 'tcsh', 
+      'dash', 'launchctl', 'wait4path', 'realpath', 'find', 'grep', 'sed', 'awk', 
+      'tar', 'gzip', 'gunzip', 'which', 'whoami', 'id', 'env', 'printenv'
+    ];
 
     socket.on('checkPath', () => {
       const pathVar = process.env.PATH || '';
@@ -1452,7 +1453,43 @@ app.whenReady().then(async () => {
 
     socket.on('getExecutables', () => {
       try {
-        const executables = fs.readdirSync(binPath);
+        const allFiles = fs.readdirSync(binPath);
+        // Filter out forbidden binaries and validate they're AI model scripts
+        const executables = allFiles.filter(file => {
+          // Skip forbidden binaries
+          if (FORBIDDEN_BINARIES.includes(file)) {
+            console.warn(`[SECURITY] Filtering out forbidden binary: ${file}`);
+            return false;
+          }
+          
+          // Skip hidden files and directories
+          if (file.startsWith('.')) {
+            return false;
+          }
+          
+          // Verify it's a file
+          const filePath = path.join(binPath, file);
+          try {
+            if (!fs.lstatSync(filePath).isFile()) {
+              return false;
+            }
+            
+            // Verify it's an AI model script (docker model run)
+            const content = fs.readFileSync(filePath, 'utf8');
+            if (!content.includes('docker model run')) {
+              console.warn(`[SECURITY] Skipping non-AI-model script: ${file}`);
+              return false;
+            }
+            
+            return true;
+          } catch (err) {
+            // If we can't read it, skip it
+            console.warn(`[SECURITY] Skipping unreadable file: ${file}`);
+            return false;
+          }
+        });
+        
+        console.log(`✓ Found ${executables.length} AI model executable(s)`);
         socket.emit('executables', executables);
       } catch (error) {
         console.error('Error reading executables:', error);
@@ -1461,55 +1498,43 @@ app.whenReady().then(async () => {
 
     socket.on('createExecutable', (data: any) => {
       try {
-        const { name, image, model, tty, interactive, autoRemove, detach, restart, entrypoint, pull, platform, runtime, workdir, network, publishAll, ulimit, memory, cpus, privileged, readOnly, secrets, securityOpts, logDriver, logOpts, addHosts, devices, labels, command, ports, volumes, env, containerName } = data;
-        let script = `#!/bin/sh\n`;
-
-        if (model) {
-          script += `docker model run ${image} "$@"`;
-        } else {
-          script += 'docker run ';
-
-          if (containerName) script += `--name=${containerName} `;
-          if (detach) script += '-d ';
-          if (autoRemove) script += '--rm ';
-          if (tty) script += '-t ';
-          if (interactive) script += '-i ';
-          if (publishAll) script += '-P ';
-          if (privileged) script += '--privileged ';
-          if (readOnly) script += '--read-only ';
-          if (restart) script += `--restart=${restart} `;
-          if (entrypoint) script += `--entrypoint=${entrypoint} `;
-          if (pull) script += `--pull=${pull} `;
-          if (platform) script += `--platform=${platform} `;
-          if (runtime) script += `--runtime=${runtime} `;
-          if (workdir) script += `--workdir=${workdir} `;
-          if (network) script += `--network=${network} `;
-          if (ulimit) script += `--ulimit ${ulimit} `;
-          if (memory) script += `--memory=${memory} `;
-          if (cpus) script += `--cpus=${cpus} `;
-          if (logDriver) script += `--log-driver=${logDriver} `;
-
-          logOpts.forEach((opt: { key: string; value: string }) => { if (opt.key && opt.value) script += `--log-opt ${opt.key}=${opt.value} `; });
-          addHosts.forEach((host: string) => { if (host) script += `--add-host=${host} `; });
-          devices.forEach((device: string) => { if (device) script += `--device=${device} `; });
-          labels.forEach((label: { key: string; value: string }) => { if (label.key && label.value) script += `--label ${label.key}=${label.value} `; });
-          secrets.forEach((secret: string) => { if (secret) script += `--secret ${secret} `; });
-          // securityOpts.forEach((opt: string) => { if (opt) script += `--security-opt ${opt} `; });
-          ports.forEach((p: { host: string; container: string }) => { if (p.host && p.container) script += `-p ${p.host}:${p.container} `; });
-          volumes.forEach((v: { host: string; container: string }) => { if (v.host && v.container) script += `-v ${v.host}:${v.container} `; });
-          env.forEach((e: { name: string; value: string }) => { if (e.name && e.value) script += `-e ${e.name}=${e.value} `; });
-
-          script += `${image} ${command} "$@"`;
+        const { name, image } = data;
+        
+        // Security check: prevent overriding system binaries
+        if (FORBIDDEN_BINARIES.includes(name)) {
+          console.error(`[SECURITY] Attempt to create forbidden executable: ${name}`);
+          socket.emit('error', `Cannot create executable '${name}': This name is reserved for system binaries.`);
+          return;
         }
+        
+        // Validate executable name (alphanumeric, dash, underscore only)
+        if (!/^[a-zA-Z0-9_-]+$/.test(name)) {
+          console.error(`[SECURITY] Invalid executable name: ${name}`);
+          socket.emit('error', `Invalid executable name '${name}': Use only letters, numbers, dash, and underscore.`);
+          return;
+        }
+        
+        // Validate that image is provided
+        if (!image) {
+          console.error(`[SECURITY] No image provided for executable: ${name}`);
+          socket.emit('error', `Please select an AI model.`);
+          return;
+        }
+        
+        // Only create AI model executables (docker model run)
+        const script = `#!/bin/sh\ndocker model run ${image} "$@"\n`;
         
         const filePath = path.join(binPath, name);
         fs.writeFileSync(filePath, script);
         fs.chmodSync(filePath, '755');
         
+        console.log(`✓ Created AI model executable: ${name} -> ${image}`);
+        
         const executables = fs.readdirSync(binPath);
         io.emit('executables', executables);
       } catch (error) {
         console.error('Error creating executable:', error);
+        socket.emit('error', 'Failed to create executable');
       }
     });
 
@@ -1525,85 +1550,35 @@ app.whenReady().then(async () => {
 
     socket.on('getExecutable', (name: string) => {
       try {
-        const script = fs.readFileSync(path.join(binPath, name), 'utf8');
-        const isModel = script.includes('docker model run');
-        
-        const data: any = { name, model: isModel };
-
-        if (isModel) {
-          const dockerCommand = script.split('docker model run ')[1].split(' "$@"')[0];
-          data.image = dockerCommand.trim();
-        } else {
-          const dockerRunCommand = script.split('docker run ')[1].split(' "$@"')[0];
-          
-          const getStringValue = (flag: string) => (dockerRunCommand.match(new RegExp(`--${flag}=(\\S+)`)) || [])[1] || '';
-          const getArrayValues = (flag: string) => [...dockerRunCommand.matchAll(new RegExp(`--${flag}=(\\S+)`, 'g'))].map(m => m[1]);
-          const getKeyValueArrayValues = (flag: string) => Array.from(dockerRunCommand.matchAll(new RegExp(`--${flag} (\\S+=\\S+)`, 'g'))).map(m => {
-            const [key, value] = m[1].split('=');
-            return { key, value };
-          });
-          
-          Object.assign(data, {
-            tty: /-t/.test(dockerRunCommand),
-            interactive: /-i/.test(dockerRunCommand),
-            autoRemove: /--rm/.test(dockerRunCommand),
-            detach: /-d/.test(dockerRunCommand),
-            publishAll: /-P/.test(dockerRunCommand),
-            privileged: /--privileged/.test(dockerRunCommand),
-            readOnly: /--read-only/.test(dockerRunCommand),
-            restart: getStringValue('restart'),
-            entrypoint: getStringValue('entrypoint'),
-            pull: getStringValue('pull'),
-            platform: getStringValue('platform'),
-            runtime: getStringValue('runtime'),
-            workdir: getStringValue('workdir'),
-            network: getStringValue('network'),
-            ulimit: (dockerRunCommand.match(/--ulimit (\S+)/) || [])[1] || '',
-            memory: getStringValue('memory'),
-            cpus: getStringValue('cpus'),
-            containerName: getStringValue('name'),
-            logDriver: getStringValue('log-driver'),
-            logOpts: getKeyValueArrayValues('log-opt'),
-            addHosts: getArrayValues('add-host'),
-            devices: getArrayValues('device'),
-            labels: getKeyValueArrayValues('label'),
-            secrets: getArrayValues('secret'),
-            securityOpts: getArrayValues('security-opt'),
-            ports: Array.from(dockerRunCommand.matchAll(/-p (\S+:\S+)/g)).map(m => { const [host, container] = m[1].split(':'); return { host, container }; }),
-            volumes: Array.from(dockerRunCommand.matchAll(/-v (\S+:\S+)/g)).map(m => { const [host, container] = m[1].split(':'); return { host, container }; }),
-            env: Array.from(dockerRunCommand.matchAll(/-e (\S+=\S+)/g)).map(m => { const [name, value] = m[1].split('='); return { name, value }; }),
-          });
-
-          const commandParts = dockerRunCommand
-            .replace(/--rm|-[ti]|-d|-P|--privileged|--read-only/g, '')
-            .replace(/--restart=\S+/g, '')
-            .replace(/--entrypoint=\S+/g, '')
-            .replace(/--pull=\S+/g, '')
-            .replace(/--platform=\S+/g, '')
-            .replace(/--runtime=\S+/g, '')
-            .replace(/--workdir=\S+/g, '')
-            .replace(/--network=\S+/g, '')
-            .replace(/--ulimit \S+/g, '')
-            .replace(/--memory=\S+/g, '')
-            .replace(/--cpus=\S+/g, '')
-            .replace(/--name=\S+/g, '')
-            .replace(/--log-driver=\S+/g, '')
-            .replace(/--log-opt \S+=\S+/g, '')
-            .replace(/--add-host=\S+/g, '')
-            .replace(/--device=\S+/g, '')
-            .replace(/--label \S+=\S+/g, '')
-            .replace(/--secret \S+/g, '')
-            .replace(/--security-opt \S+/g, '')
-            .replace(/-p \S+:\S+/g, '')
-            .replace(/-v \S+:\S+/g, '')
-            .replace(/-e \S+=\S+/g, '')
-            .trim()
-            .split(' ');
-          
-          data.image = commandParts[0];
-          data.command = commandParts.slice(1).join(' ');
+        // Skip forbidden binaries
+        if (FORBIDDEN_BINARIES.includes(name)) {
+          console.warn(`[SECURITY] Skipping forbidden binary: ${name}`);
+          return;
         }
         
+        const script = fs.readFileSync(path.join(binPath, name), 'utf8');
+        
+        // Validate it's a Docker model script
+        if (!script.includes('docker model run')) {
+          console.warn(`[SECURITY] Skipping non-AI-model file: ${name}`);
+          return;
+        }
+        
+        // Parse AI model executable (format: docker model run <image> "$@")
+        const parts = script.split('docker model run ');
+        if (parts.length < 2) {
+          console.error(`Invalid model script format for ${name}`);
+          return;
+        }
+        
+        const modelImage = parts[1].split(' "$@"')[0].trim();
+        
+        const data = {
+          name,
+          image: modelImage,
+        };
+        
+        console.log(`✓ Loaded executable: ${name} -> ${modelImage}`);
         socket.emit('executable', data);
       } catch (error) {
         console.error('Error getting executable:', error);
@@ -2721,89 +2696,6 @@ exec "$@"
 
     socket.on('getChatModels', getChatModels);
 
-    // Helper function to parse tool calls from model output
-    // const parseToolCall = (text: string, agentId?: string): { name: string; arguments: any } | null => {
-    //   try {
-    //     // Stream thinking text to agent terminal instead of logging
-    //     if (agentId) {
-    //       io.emit('agentThinkingText', { agentId, text: text.substring(0, 500) + '\n\n' });
-    //     }
-        
-    //     // First priority: look for markdown code blocks with JSON (as per prompt instructions)
-    //     const codeBlockPatterns = [
-    //       /```json\s*(\{[\s\S]*?\})\s*```/,
-    //       /```\s*(\{[\s\S]*?"tool_call"[\s\S]*?\})\s*```/,
-    //     ];
-        
-    //     for (const pattern of codeBlockPatterns) {
-    //       const match = text.match(pattern);
-    //       if (match) {
-    //         try {
-    //           const parsed = JSON.parse(match[1]);
-    //           if (parsed.tool_call && parsed.tool_call.name) {
-    //             console.log('Found tool call in code block:', parsed.tool_call);
-    //             return parsed.tool_call;
-    //           }
-    //         } catch (e) {
-    //           // Not valid JSON, try next pattern
-    //           continue;
-    //         }
-    //       }
-    //     }
-        
-    //     // Second priority: try to find a JSON object with "tool_call" key
-    //     // Look for patterns like {"tool_call": {...}} or {tool_call: {...}}
-    //     const patterns = [
-    //       /\{"tool_call"\s*:\s*\{[^}]*"name"\s*:\s*"[^"]+"[^}]*\}[^}]*\}/,
-    //       /\{[\s\S]*?"tool_call"[\s\S]*?\{[\s\S]*?"name"[\s\S]*?:[\s\S]*?"[^"]+"[\s\S]*?\}[\s\S]*?\}/,
-    //     ];
-        
-    //     // Try each pattern
-    //     for (const pattern of patterns) {
-    //       const match = text.match(pattern);
-    //       if (match) {
-    //         try {
-    //           const parsed = JSON.parse(match[0]);
-    //           if (parsed.tool_call && parsed.tool_call.name) {
-    //             console.log('Found tool call in JSON pattern:', parsed.tool_call);
-    //             return parsed.tool_call;
-    //           }
-    //         } catch (e) {
-    //           // Try next pattern
-    //           continue;
-    //         }
-    //       }
-    //     }
-        
-    //     // If no pattern matched, try to find any JSON object and check if it has tool_call
-    //     // Look for JSON objects in the text (more flexible approach)
-    //     const jsonMatches = text.match(/\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}/g);
-    //     if (jsonMatches) {
-    //       for (const jsonStr of jsonMatches) {
-    //         try {
-    //           const parsed = JSON.parse(jsonStr);
-    //           if (parsed.tool_call && parsed.tool_call.name) {
-    //             console.log('Found tool call in JSON match:', parsed.tool_call);
-    //             return parsed.tool_call;
-    //           }
-    //           // Also check if the object itself is a tool_call
-    //           if (parsed.name && (parsed.arguments || parsed.arguments === null)) {
-    //             console.log('Found direct tool call format:', parsed);
-    //             return { name: parsed.name, arguments: parsed.arguments || {} };
-    //           }
-    //         } catch (e) {
-    //           // Not valid JSON, continue
-    //           continue;
-    //         }
-    //       }
-    //     }
-        
-    //   } catch (err) {
-    //     console.error('Error parsing tool call:', err);
-    //   }
-    //   return null;
-    // };
-
     // Helper to compare arrays
     const arraysEqual = (a: string[], b: string[]): boolean => {
       if (a.length !== b.length) return false;
@@ -2811,1050 +2703,6 @@ exec "$@"
       const sortedB = [...b].sort();
       return sortedA.every((val, idx) => val === sortedB[idx]);
     };
-
-    // Helper to validate and fix tool call arguments
-    // const validateAndFixToolCall = (toolCall: { name: string; arguments: any }): { valid: boolean; fixedCall?: { name: string; arguments: any }; error?: string; suggestion?: string } => {
-    //   const { name, arguments: args } = toolCall;
-      
-    //   // Validation rules for node-code-sandbox tools
-    //   if (name === 'run_js') {
-    //     // run_js requires container_id and listenOnPort
-    //     // Most models don't initialize a sandbox first, so suggest run_js_ephemeral instead
-    //     if (!args.container_id || args.listenOnPort === undefined || args.listenOnPort === null) {
-    //       return {
-    //         valid: false,
-    //         fixedCall: {
-    //           name: 'run_js_ephemeral',
-    //           arguments: { code: args.code || args }
-    //         },
-    //         error: 'run_js requires a pre-initialized sandbox (container_id and listenOnPort)',
-    //         suggestion: 'Auto-correcting to use run_js_ephemeral instead'
-    //       };
-    //     }
-    //   }
-      
-    //   // sandbox_exec also requires container_id
-    //   if (name === 'sandbox_exec') {
-    //     if (!args.container_id) {
-    //       return {
-    //         valid: false,
-    //         error: 'sandbox_exec requires container_id from sandbox_initialize',
-    //         suggestion: 'You must call sandbox_initialize first, or use run_js_ephemeral for one-off execution'
-    //       };
-    //     }
-    //   }
-      
-    //   // sandbox_stop also requires container_id
-    //   if (name === 'sandbox_stop') {
-    //     if (!args.container_id) {
-    //       return {
-    //         valid: false,
-    //         error: 'sandbox_stop requires container_id',
-    //         suggestion: 'Skip this call if you used run_js_ephemeral'
-    //       };
-    //     }
-    //   }
-      
-    //   // All validations passed
-    //   return { valid: true };
-    // };
-
-    // Helper function to parse JSON response and split thinking from final answer
-    // Everything that is NOT JSON is considered "thinking"
-    // The final JSON object is the answer
-    const parseJSONResponse = (text: string): { thinking: string; finalAnswer: string; hasFinalAnswer: boolean } => {
-      // Look for JSON code blocks or standalone JSON objects
-      // Try to find the last complete JSON object in the response
-      const jsonCodeBlockPattern = /```json\s*(\{[\s\S]*?\})\s*```/g;
-      const jsonObjectPattern = /\{[\s\S]*?\}/g;
-      
-      let finalAnswer = '';
-      let hasFinalAnswer = false;
-      let thinking = text;
-      
-      // First, try to find JSON in code blocks
-      const codeBlockMatches: Array<{ match: string; index: number; endIndex: number }> = [];
-      let match;
-      
-      while ((match = jsonCodeBlockPattern.exec(text)) !== null) {
-        codeBlockMatches.push({
-          match: match[1], // The JSON content without the code block markers
-          index: match.index,
-          endIndex: match.index + match[0].length
-        });
-      }
-      
-      // If we found JSON code blocks, use the last one as the final answer
-      if (codeBlockMatches.length > 0) {
-        const lastMatch = codeBlockMatches[codeBlockMatches.length - 1];
-        try {
-          // Validate it's valid JSON
-          JSON.parse(lastMatch.match);
-          finalAnswer = lastMatch.match;
-          hasFinalAnswer = true;
-          // Everything before the last JSON block is thinking
-          thinking = text.substring(0, lastMatch.index).trim();
-        } catch (e) {
-          // Not valid JSON, ignore
-        }
-      } else {
-        // Try to find standalone JSON objects
-        const objectMatches: Array<{ match: string; index: number; endIndex: number }> = [];
-        let jsonMatch;
-        
-        while ((jsonMatch = jsonObjectPattern.exec(text)) !== null) {
-          try {
-            // Validate it's valid JSON
-            JSON.parse(jsonMatch[0]);
-            objectMatches.push({
-              match: jsonMatch[0],
-              index: jsonMatch.index,
-              endIndex: jsonMatch.index + jsonMatch[0].length
-            });
-          } catch (e) {
-            // Not valid JSON, skip
-          }
-        }
-        
-        // Use the last valid JSON object as final answer
-        if (objectMatches.length > 0) {
-          const lastMatch = objectMatches[objectMatches.length - 1];
-          finalAnswer = lastMatch.match;
-          hasFinalAnswer = true;
-          // Everything before the last JSON object is thinking
-          thinking = text.substring(0, lastMatch.index).trim();
-        }
-      }
-      
-      return { thinking, finalAnswer, hasFinalAnswer };
-    };
-    
-    // Helper function to run a conversation loop with tool calling
-//     const runConversationLoop = async (
-//       initialPrompt: string,
-//       model: string,
-//       mcpClient: MCPClient | null,
-//       requestId: string,
-//       socket: any,
-//       projectPath: string | null,
-//       thinkingTokens: number,
-//       responseId?: string,
-//       maxIterations: number = 10,
-//       agentId?: string
-//     ): Promise<{ 
-//       finalResponse: string; 
-//       toolCalls: Array<{ name: string; arguments: any; result: any }>;
-//       finalAnswerStartIndex?: number;
-//       finalAnswerWasStreamed: boolean;
-//     }> => {
-//       const conversationHistory: Array<{ role: 'user' | 'assistant' | 'tool'; content: string; toolCall?: any; toolResult?: any }> = [];
-//       const toolCalls: Array<{ name: string; arguments: any; result: any }> = [];
-//       const failedTools: Map<string, number> = new Map(); // Track how many times each tool has failed
-//       const finalResponseId = responseId || Date.now().toString();
-      
-//       // Add initial user prompt
-//       conversationHistory.push({ role: 'user', content: initialPrompt });
-      
-//       let iteration = 0;
-//       let finalResponse = '';
-//       let isFinalResponseDetermined = false; // Track when we've determined this is the final response
-//       let finalAnswerStartIndex = -1; // Track where final answer starts (character position) - shared across iterations
-//       let hasSeenFinalAnswer = false; // Track if we've detected Final Answer section - shared across iterations
-//       let lastFinalAnswerStreamedLength = 0; // Track what we've already streamed to chat - shared across iterations
-      
-//       while (iteration < maxIterations) {
-//         iteration++;
-//         console.log(`Conversation loop iteration ${iteration}/${maxIterations}`);
-        
-//         let responseContent = ''; // Reset for each iteration
-//         let thinkingContent = ''; // Track thinking content for this iteration
-        
-//         // Build the prompt with conversation history
-//         let promptToSend = '';
-        
-//         // Add conversation context (limit history to prevent context overflow)
-//         // Keep recent messages but summarize older tool results
-//         const maxHistoryMessages = 10; // Limit to last 10 messages
-//         const messagesToInclude = conversationHistory.slice(-maxHistoryMessages);
-        
-//         // Build a summary of tools already called
-//         const toolsSummary = toolCalls.map(tc => 
-//           `${tc.name}(${JSON.stringify(tc.arguments).substring(0, 100)})`
-//         ).join(', ');
-        
-//         if (toolsSummary) {
-//           promptToSend += `[Tools already called: ${toolsSummary}]\n\n`;
-//         }
-        
-//         // Warn about failed tools - make it very prominent
-//         const failedToolsList: string[] = [];
-//         for (const [toolName, failureCount] of failedTools.entries()) {
-//           if (failureCount >= 1) {
-//             failedToolsList.push(`${toolName} (failed ${failureCount} time${failureCount > 1 ? 's' : ''})`);
-//           }
-//         }
-        
-//         if (failedToolsList.length > 0) {
-//           promptToSend += `\n\n🚨 CRITICAL: These tools have FAILED and MUST NOT be used: ${failedToolsList.join(', ')}. \n`;
-//           promptToSend += `DO NOT attempt to call these tools again - they will not work. Use ONLY the working tools: ${mcpClient?.getTools().map((t: any) => t.name).filter((name: string) => !failedTools.has(name)).join(', ') || 'none available'}.\n`;
-//           promptToSend += `If no working tools are available, provide your answer based on the information you already have.\n\n`;
-//         }
-        
-//         // Deduplicate messages - don't include repeated assistant messages with same tool calls
-//         const seenToolCalls = new Set<string>();
-//         const deduplicatedMessages: typeof messagesToInclude = [];
-        
-//         for (const msg of messagesToInclude) {
-//           if (msg.role === 'user') {
-//             deduplicatedMessages.push(msg);
-//           } else if (msg.role === 'tool') {
-//             deduplicatedMessages.push(msg);
-//           } else if (msg.role === 'assistant') {
-//             const hasToolCall = parseToolCall(msg.content);
-//             if (hasToolCall) {
-//               const toolCallKey = `${hasToolCall.name}:${JSON.stringify(hasToolCall.arguments)}`;
-//               if (!seenToolCalls.has(toolCallKey)) {
-//                 seenToolCalls.add(toolCallKey);
-//                 deduplicatedMessages.push(msg);
-//               }
-//               // Skip duplicate tool call attempts
-//             } else {
-//               // Include non-tool-call assistant messages
-//               deduplicatedMessages.push(msg);
-//             }
-//           }
-//         }
-        
-//         for (const msg of deduplicatedMessages) {
-//           if (msg.role === 'user') {
-//             promptToSend += `User: ${msg.content}\n\n`;
-//           } else if (msg.role === 'tool') {
-//             // Summarize large tool results to prevent context overflow
-//             const toolResultStr = JSON.stringify(msg.toolResult);
-//             if (toolResultStr.length > 2000) {
-//               // Summarize very large results
-//               const summary = `Tool ${msg.toolCall?.name} returned ${toolResultStr.length} characters of data. Key content: ${toolResultStr.substring(0, 1500)}... (truncated)`;
-//               promptToSend += `Tool Result (${msg.toolCall?.name}): ${summary}\n\n`;
-//             } else {
-//               promptToSend += `Tool Result (${msg.toolCall?.name}): ${toolResultStr}\n\n`;
-//             }
-            
-//             // If this is a duplicate prevention message, emphasize it
-//             if (msg.content.includes('Duplicate call prevented')) {
-//               promptToSend += `[IMPORTANT: This tool was already called. Use the result above - do NOT call it again with the same arguments.]\n\n`;
-//             }
-//           } else if (msg.role === 'assistant') {
-//             // Only include assistant responses that aren't just tool call attempts
-//             const hasToolCall = parseToolCall(msg.content);
-//             if (!hasToolCall) {
-//               promptToSend += `Assistant: ${msg.content}\n\n`;
-//             } else {
-//               // Summarize tool call attempts - but now we've deduplicated so this should be unique
-//               promptToSend += `Assistant: [Called tool ${hasToolCall.name}]\n\n`;
-//             }
-//           }
-//         }
-        
-//         // Warn if we truncated history
-//         if (conversationHistory.length > maxHistoryMessages) {
-//           promptToSend += `\n[Note: Previous conversation history truncated to prevent context overflow. You have access to the most recent ${maxHistoryMessages} messages.]\n\n`;
-//         }
-        
-//         // Add current request context
-//         // Only include projectPath if it's provided (agent has Project Path attribute enabled)
-//         const contextInfo = projectPath ? `\n[CWD: ${projectPath}]` : '';
-        
-//         // Add continuation instruction based on iteration
-//         if (iteration === 1) {
-//           promptToSend += `Based on the above, please respond.\n\n`;
-          
-//           if (mcpClient && mcpClient.isConnected() && mcpClient.getTools().length > 0) {
-//             promptToSend += `🚨 CRITICAL INSTRUCTION: If you need to gather information, you MUST use the available tools.\n\n`;
-//             promptToSend += `To call a tool, you MUST include this EXACT format in your response:\n\`\`\`json\n{"tool_call": {"name": "tool_name", "arguments": {...}}}\n\`\`\`\n\n`;
-//             promptToSend += `❌ DO NOT just say:\n- "I need to use tool X"\n- "Let's use tool X"\n- "We should call tool X"\n\n✅ DO THIS INSTEAD:\nInclude the JSON code block above with the tool_call format.\n\nExample: If you want to use read_wiki_structure for "higginsrob/jdom", your response MUST include:\n\`\`\`json\n{"tool_call": {"name": "read_wiki_structure", "arguments": {"repoName": "higginsrob/jdom"}}}\n\`\`\`\n\n`;
-//           }
-          
-//           promptToSend += contextInfo;
-//         } else {
-//           // More explicit instructions for subsequent iterations
-//           // Count how many times we've called tools
-//           const toolCallCount = toolCalls.length;
-//           const duplicateCount = conversationHistory.filter(msg => 
-//             msg.role === 'tool' && msg.content.includes('Duplicate call prevented')
-//           ).length;
-          
-//           promptToSend += `Based on the conversation history and tool results above, please continue:\n`;
-          
-//           // Repeat failed tools warning in continuation instructions
-//           if (failedToolsList.length > 0) {
-//             promptToSend += `\n🚨 CRITICAL REMINDER: DO NOT use these FAILED tools: ${failedToolsList.map(t => t.split(' ')[0]).join(', ')}. They will NOT work and will be BLOCKED.\n`;
-//             promptToSend += `Use ONLY the working tools listed above.\n`;
-//           }
-          
-//           if (duplicateCount >= 2) {
-//             // Force final answer after multiple duplicates
-//             promptToSend += `\n[CRITICAL: You have already tried calling tools multiple times. You MUST provide your final answer NOW based on the tool results you already have. Do NOT call any more tools.]\n\n`;
-//           } else if (toolCallCount >= 3) {
-//             // Suggest providing final answer after multiple tool calls
-//             promptToSend += `\n[IMPORTANT: You have already called ${toolCallCount} tools. Review the tool results above and provide your final answer. Only call additional tools if you absolutely need different information.]\n\n`;
-//           } else {
-//             promptToSend += `1. If you have enough information from the tool results to answer the user's question, provide your final answer now.\n`;
-//             promptToSend += `2. If you need more information, use tools - but ONLY use tools that have NOT failed. Check the failed tools list above.\n`;
-//             promptToSend += `3. Review the tool results in the conversation history before calling tools again.\n`;
-//             promptToSend += `\n⚠️ CRITICAL: To call a tool, you MUST include a JSON code block:\n\`\`\`json\n{"tool_call": {"name": "tool_name", "arguments": {...}}}\n\`\`\`\n\nDO NOT just describe what tool you want to use - you MUST include the JSON code block above.\n`;
-//             promptToSend += `\nRemember: Tool results are already in the conversation history above. Use them to answer, or call tools with NEW arguments if you need different information.\n`;
-//           }
-          
-//           promptToSend += contextInfo;
-//         }
-        
-//         // If MCP tools are available, add them to the prompt
-//         if (mcpClient && mcpClient.isConnected()) {
-//           const toolsPrompt = mcpClient.getToolsPrompt();
-//           if (toolsPrompt) {
-//             promptToSend += toolsPrompt;
-//           }
-//         }
-        
-//         // Run the model
-//         const dockerProcess = spawn(
-//           '/usr/local/bin/docker',
-//           ['model', 'run', model],
-//           {
-//             env: { 
-//               ...process.env, 
-//               PATH: '/usr/local/bin:/usr/bin:/bin',
-//             },
-//             cwd: projectPath || process.cwd(),
-//           }
-//         );
-        
-//         // Store process for potential abort
-//         const processKey = `${requestId}-${iteration}`;
-//         activeProcesses.set(processKey, dockerProcess);
-        
-//         let stderrContent = '';
-//         let shouldBreakLoop = false;
-        
-//         // Send prompt to model
-//         if (dockerProcess.stdin) {
-//           dockerProcess.stdin.write(promptToSend + '\n');
-//           dockerProcess.stdin.end();
-//         }
-        
-        
-//         // Collect response with streaming
-//         let accumulatedFullContent = ''; // Track all content (thinking + final answer)
-//         let lastStreamedLength = 0; // Track what we've already streamed to agent terminal
-//         // Note: finalAnswerStartIndex, hasSeenFinalAnswer, and lastFinalAnswerStreamedLength are declared outside loop
-        
-//         try {
-//           await new Promise<void>((resolve, reject) => {
-//             if (dockerProcess.stdout) {
-//               dockerProcess.stdout.on('data', (chunk: Buffer) => {
-//                 const text = chunk.toString('utf8');
-//                 responseContent += text;
-//                 accumulatedFullContent += text;
-                
-//                 // Parse the accumulated content to extract structured sections
-//                 const parsed = parseJSONResponse(responseContent);
-                
-//                 // If we detect a Final Answer section, mark it and record start position
-//                 if (parsed.hasFinalAnswer && !hasSeenFinalAnswer) {
-//                   hasSeenFinalAnswer = true;
-//                   // Calculate where final answer starts in the accumulated content
-//                   // Find the position of the final JSON block
-//                   const finalAnswerMatch = responseContent.match(/```json\s*(\{[\s\S]*?\})\s*```/);
-//                   if (finalAnswerMatch) {
-//                     finalAnswerStartIndex = finalAnswerMatch.index || responseContent.indexOf(finalAnswerMatch[1]);
-//                   } else {
-//                     // Try to find standalone JSON
-//                     const jsonMatch = responseContent.match(/\{[\s\S]*?\}/g);
-//                     if (jsonMatch && jsonMatch.length > 0) {
-//                       const lastJson = jsonMatch[jsonMatch.length - 1];
-//                       finalAnswerStartIndex = responseContent.lastIndexOf(lastJson);
-//                     }
-//                   }
-//                 }
-                
-//                 // Stream ALL new content to agent terminal (thinking + final answer)
-//                 if (agentId) {
-//                   const newContent = accumulatedFullContent.substring(lastStreamedLength);
-//                   if (newContent) {
-//                     io.emit('agentThinkingText', { agentId, text: newContent });
-//                     lastStreamedLength = accumulatedFullContent.length;
-//                     thinkingContent += newContent;
-//                   }
-//                 }
-                
-//                 // Stream only final answer portion to chat (after we detect Final Answer section)
-//                 if (parsed.finalAnswer && hasSeenFinalAnswer) {
-//                   // Extract the "answer" field from JSON if present
-//                   let answerText = parsed.finalAnswer;
-//                   try {
-//                     const jsonObj = JSON.parse(parsed.finalAnswer);
-//                     if (jsonObj.answer) {
-//                       answerText = jsonObj.answer;
-//                     } else {
-//                       // If no "answer" field, use the whole JSON as string
-//                       answerText = JSON.stringify(jsonObj, null, 2);
-//                     }
-//                   } catch (e) {
-//                     // Not valid JSON, use as-is
-//                   }
-                  
-//                   const newFinalContent = answerText.substring(lastFinalAnswerStreamedLength);
-//                   if (newFinalContent) {
-//                     socket.emit('chatResponseChunk', {
-//                       id: finalResponseId,
-//                       chunk: newFinalContent
-//                     });
-//                     lastFinalAnswerStreamedLength = answerText.length;
-//                   }
-//                 }
-//               });
-//             }
-            
-//             // Handle stderr for token usage
-//             if (dockerProcess.stderr) {
-//               dockerProcess.stderr.on('data', (chunk: Buffer) => {
-//                 const errorText = chunk.toString('utf8');
-//                 stderrContent += errorText;
-                
-//                 // Parse token usage from stderr
-//                 const promptTokensMatch = errorText.match(/"n_prompt_tokens":(\d+)/);
-//                 const ctxMatch = errorText.match(/"n_ctx":(\d+)/);
-                
-//                 if (promptTokensMatch && ctxMatch) {
-//                   const promptTokens = parseInt(promptTokensMatch[1]);
-//                   const maxContext = parseInt(ctxMatch[1]);
-//                   const usagePercent = Math.round((promptTokens / maxContext) * 100);
-                  
-//                   socket.emit('tokenUsage', {
-//                     requestId: requestId,
-//                     promptTokens,
-//                     maxContext,
-//                     usagePercent,
-//                     requestedContext: thinkingTokens,
-//                   });
-//                 }
-//               });
-//             }
-            
-//             dockerProcess.on('close', (code: number) => {
-//               activeProcesses.delete(processKey);
-              
-//               if (code === 0) {
-//                 resolve();
-//               } else if (code === null || code === 143) {
-//                 // Process was killed (aborted)
-//                 reject(new Error('Process aborted'));
-//               } else {
-//                 reject(new Error(`Model process exited with code ${code}`));
-//               }
-//             });
-            
-//             dockerProcess.on('error', (error: Error) => {
-//               activeProcesses.delete(processKey);
-//               reject(error);
-//             });
-//           });
-//         } catch (err: any) {
-//           // Check if it's an abort error
-//           if (err.message === 'Process aborted') {
-//             throw err; // Re-throw to break out of loop
-//           }
-          
-//           // Handle model errors more gracefully
-//           console.error(`Error in iteration ${iteration}:`, err);
-          
-//           // Check if it's a context size error
-//           if (stderrContent.includes('exceed_context_size_error') || stderrContent.includes('exceeds the available context size')) {
-//             socket.emit('chatStatusUpdate', {
-//               id: responseId,
-//               status: 'Context size exceeded',
-//               details: 'Stopping conversation loop. Providing summary based on available information.'
-//             });
-//             // Use the response we got so far, or previous response
-//             finalResponse = responseContent || finalResponse || 'Unable to complete response due to context size limits.';
-//             shouldBreakLoop = true;
-//           } else if (responseContent) {
-//             // For other errors, try to continue with partial response
-//             socket.emit('chatStatusUpdate', {
-//               id: responseId,
-//               status: 'Model error occurred',
-//               details: 'Using partial response.'
-//             });
-//             finalResponse = responseContent;
-//             shouldBreakLoop = true;
-//           } else {
-//             // No response content, throw error
-//             throw err;
-//           }
-//         }
-        
-//         // Break loop if error occurred
-//         if (shouldBreakLoop) {
-//           // Stream thinking content even on error (it's still thinking, not final response)
-//           if (agentId && thinkingContent) {
-//             io.emit('agentThinkingText', { agentId, text: thinkingContent });
-//           }
-//           break;
-//         }
-        
-//         // Check for tool call - only get the first one that hasn't been called yet
-//         // Parse all potential tool calls, then filter to find one we haven't tried
-//         const parseAllToolCalls = (text: string): Array<{ name: string; arguments: any }> => {
-//           const found: Array<{ name: string; arguments: any }> = [];
-//           try {
-//             // Look for markdown code blocks with JSON
-//             const codeBlockPattern = /```json\s*(\{[\s\S]*?\})\s*```/g;
-//             let match;
-//             while ((match = codeBlockPattern.exec(text)) !== null) {
-//               try {
-//                 const parsed = JSON.parse(match[1]);
-//                 if (parsed.tool_call && parsed.tool_call.name) {
-//                   found.push(parsed.tool_call);
-//                 }
-//               } catch (e) {
-//                 // Not valid JSON, skip
-//               }
-//             }
-//           } catch (err) {
-//             // Ignore parsing errors
-//           }
-//           return found;
-//         };
-        
-//         // Parse structured response to get thought process and final answer
-//         const parsedResponse = parseJSONResponse(responseContent);
-        
-//         // Tool calls should be parsed from Thinking section (everything before the final JSON)
-//         const thinkingForToolCalls = parsedResponse.thinking || responseContent;
-        
-//         const allToolCalls = parseAllToolCalls(thinkingForToolCalls);
-//         // Find the first tool call that hasn't been called yet (checking against both successful and failed calls)
-//         let toolCall: { name: string; arguments: any } | null = null;
-//         for (const potentialCall of allToolCalls) {
-//           const callKey = `${potentialCall.name}:${JSON.stringify(potentialCall.arguments)}`;
-//           const alreadyCalled = toolCalls.some(tc => 
-//             `${tc.name}:${JSON.stringify(tc.arguments)}` === callKey
-//           );
-//           if (!alreadyCalled) {
-//             toolCall = potentialCall;
-//             break;
-//           }
-//         }
-        
-//         // Fallback to original parsing if we didn't find a new one
-//         if (!toolCall) {
-//           toolCall = parseToolCall(thinkingForToolCalls, agentId);
-//         }
-        
-//         // Check if response looks incomplete (cut off mid-JSON or mid-code-block)
-//         const incompleteJsonMatch = responseContent.match(/```json\s*\{[\s\S]*"tool_call"[\s\S]*\{[\s\S]*"name"\s*:\s*"[^"]*$/);
-//         const incompleteCodeBlock = responseContent.match(/```json\s*\{[\s\S]*"tool_call"[\s\S]*$/);
-//         const endsWithOpenBrace = responseContent.trim().endsWith('{') || responseContent.trim().endsWith('```');
-        
-//           if ((incompleteJsonMatch || incompleteCodeBlock || endsWithOpenBrace) && !toolCall) {
-//           console.log('Detected incomplete JSON in response, may be cut off');
-//           socket.emit('chatStatusUpdate', {
-//             id: finalResponseId,
-//             status: 'Incomplete response detected',
-//             details: 'Response appears cut off. Requesting final answer.'
-//           });
-//           // Try to extract any meaningful content before the incomplete JSON
-//           const textBeforeJson = responseContent.split('```json')[0].trim();
-//           finalResponse = textBeforeJson || responseContent;
-//           isFinalResponseDetermined = true; // Mark as final response - stop streaming to agent terminal
-//           break;
-//         }
-        
-//         // Check if model mentioned tools but didn't call them
-//         if (!toolCall && mcpClient && mcpClient.isConnected() && responseContent.length > 0) {
-//           const availableTools = mcpClient.getTools().map((t: any) => t.name);
-//           const mentionedTools = availableTools.filter((toolName: string) => {
-//             const lowerContent = responseContent.toLowerCase();
-//             const lowerToolName = toolName.toLowerCase();
-//             return lowerContent.includes(lowerToolName) ||
-//                    lowerContent.includes(`use ${lowerToolName}`) ||
-//                    lowerContent.includes(`call ${lowerToolName}`) ||
-//                    lowerContent.includes(`need to use ${lowerToolName}`) ||
-//                    lowerContent.includes(`let's use ${lowerToolName}`) ||
-//                    lowerContent.includes(`let's read ${lowerToolName}`) ||
-//                    lowerContent.includes(`we need to use ${lowerToolName}`) ||
-//                    lowerContent.includes(`we should use ${lowerToolName}`) ||
-//                    lowerContent.includes(`read the ${lowerToolName.replace('_', ' ')}`) ||
-//                    lowerContent.includes(`use ${lowerToolName.replace('_', ' ')}`) ||
-//                    // Check for partial matches like "read wiki" matching "read_wiki_structure"
-//                    (lowerToolName.includes('wiki') && (lowerContent.includes('read wiki') || lowerContent.includes('wiki structure'))) ||
-//                    (lowerToolName.includes('question') && lowerContent.includes('ask question'));
-//           });
-          
-//           if (mentionedTools.length > 0 && iteration < maxIterations) {
-//             console.log(`Detected tool mentions without tool call: ${mentionedTools.join(', ')}`);
-//             const primaryTool = mentionedTools[0];
-//             const exampleArgs = primaryTool === 'read_wiki_structure' || primaryTool === 'read_wiki_contents' 
-//               ? '{"repoName": "higginsrob/jdom"}'
-//               : primaryTool === 'ask_question'
-//               ? '{"repoName": "higginsrob/jdom", "question": "Your question here"}'
-//               : '{}';
-            
-//             // Stream thinking content to agent terminal (this is thinking, not final response)
-//             if (agentId && thinkingContent) {
-//               io.emit('agentThinkingText', { agentId, text: thinkingContent });
-//             }
-            
-//             socket.emit('chatStatusUpdate', {
-//               id: responseId,
-//               status: 'Tool format error',
-//               details: `Tools mentioned (${mentionedTools.join(', ')}) but not called. Retrying with proper format.`
-//             });
-            
-//             // Add very explicit feedback to conversation history
-//             conversationHistory.push({
-//               role: 'assistant',
-//               content: responseContent,
-//             });
-//             conversationHistory.push({
-//               role: 'user',
-//               content: `[FORMAT ERROR - CRITICAL] You mentioned "${mentionedTools.join(', ')}" but did NOT include the required JSON tool call format. 
-
-// Your response was: "${responseContent}"
-
-// This is WRONG. You must include a JSON code block like this:
-
-// \`\`\`json
-// {"tool_call": {"name": "${primaryTool}", "arguments": ${exampleArgs}}}
-// \`\`\`
-
-// DO NOT just describe what tool you want to use. You MUST include the JSON code block above. If you want to use ${primaryTool}, your response MUST include the JSON format shown above.`,
-//             });
-            
-//             // Continue loop to try again
-//             continue;
-//           }
-//         }
-        
-//         if (toolCall && mcpClient && mcpClient.isConnected()) {
-//           console.log(`Iteration ${iteration}: Tool call detected:`, toolCall);
-          
-//           // Stream thinking content to agent terminal (this is thinking, not final response)
-//           // We detected a tool call, so this is definitely thinking/reasoning, not final response
-//           if (agentId && thinkingContent) {
-//             io.emit('agentThinkingText', { agentId, text: thinkingContent });
-//           }
-          
-//           // Check if this tool has failed - block after just 1 failure for MCP errors
-//           const toolFailureCount = failedTools.get(toolCall.name) || 0;
-//           if (toolFailureCount >= 1) {
-//             socket.emit('chatStatusUpdate', {
-//               id: responseId,
-//               status: `Tool '${toolCall.name}' blocked`,
-//               details: `Tool has failed ${toolFailureCount} time${toolFailureCount > 1 ? 's' : ''} and is blocked. Using alternative tools.`
-//             });
-//             conversationHistory.push({
-//               role: 'user',
-//               content: `[Tool Blocked] Tool '${toolCall.name}' has failed ${toolFailureCount} time${toolFailureCount > 1 ? 's' : ''} and is BLOCKED. Do NOT use this tool again - use alternative tools instead.`,
-//             });
-            
-//             // Force final answer if we've tried to use failed tools multiple times
-//             const blockedAttempts = conversationHistory.filter(msg => 
-//               msg.content.includes('[Tool Blocked]')
-//             ).length;
-            
-//             if (blockedAttempts >= 2) {
-//               socket.emit('chatStatusUpdate', {
-//                 id: responseId,
-//                 status: 'Multiple blocked tool attempts',
-//                 details: 'Providing final answer based on available information.'
-//               });
-//               const textBeforeToolCall = responseContent.split('```json')[0].trim();
-//               finalResponse = textBeforeToolCall || responseContent || 'Unable to proceed due to tool failures.';
-//               break;
-//             }
-            
-//             continue;
-//           }
-          
-//           // Check for duplicate tool calls (same tool with same arguments)
-//           const duplicateCall = toolCalls.find(tc => 
-//             tc.name === toolCall.name && 
-//             JSON.stringify(tc.arguments) === JSON.stringify(toolCall.arguments)
-//           );
-          
-//           if (duplicateCall) {
-//             console.log(`Warning: Duplicate tool call detected: ${toolCall.name} with same arguments`);
-            
-//             // Provide the previous result more explicitly
-//             const previousResult = JSON.stringify(duplicateCall.result, null, 2);
-//             const resultPreview = previousResult.length > 500 
-//               ? previousResult.substring(0, 500) + '... (truncated)' 
-//               : previousResult;
-            
-//             socket.emit('chatStatusUpdate', {
-//               id: responseId,
-//               status: `Tool '${toolCall.name}' already called`,
-//               details: `Duplicate call prevented. Using previous result.`
-//             });
-            
-//             // Add a note to conversation history with the result explicitly
-//             conversationHistory.push({
-//               role: 'assistant',
-//               content: responseContent,
-//             });
-//             conversationHistory.push({
-//               role: 'tool',
-//               content: `[Duplicate call prevented] Tool ${toolCall.name} was already called with these arguments. Previous result: ${resultPreview}`,
-//               toolCall: toolCall,
-//               toolResult: duplicateCall.result,
-//             });
-            
-//             // Limit duplicate retries to prevent infinite loops
-//             const duplicateCount = conversationHistory.filter(msg => 
-//               msg.role === 'tool' && msg.content.includes('Duplicate call prevented')
-//             ).length;
-            
-//             if (duplicateCount >= 2) {
-//               // After 2 duplicates, force final answer
-//               socket.emit('chatStatusUpdate', {
-//                 id: responseId,
-//                 status: 'Maximum duplicate retries reached',
-//                 details: `Providing final answer based on available information.`
-//               });
-//               // Extract any meaningful content before the tool call
-//               const textBeforeToolCall = responseContent.split('```json')[0].trim();
-//               finalResponse = textBeforeToolCall || responseContent || 'Unable to proceed - repeated duplicate tool calls detected.';
-//               break;
-//             }
-            
-//             // Continue loop - let model try again
-//             continue;
-//           }
-          
-//           // Validate tool call
-//           const validation = validateAndFixToolCall(toolCall);
-          
-//           if (!validation.valid && !validation.fixedCall) {
-//             // Can't fix, add error to conversation and break
-//             socket.emit('chatStatusUpdate', {
-//               id: responseId,
-//               status: 'Tool call error',
-//               details: `${validation.error}. ${validation.suggestion}`
-//             });
-//             finalResponse = responseContent + `\n\nTool call failed: ${validation.error}`;
-//             break;
-//           }
-          
-//           // Use fixed call if validation failed but can be fixed
-//           const actualToolCall = validation.fixedCall || toolCall;
-          
-//           // Emit status update for tool call
-//           const toolCallSummary = JSON.stringify(actualToolCall.arguments, null, 2).substring(0, 200);
-//           socket.emit('chatStatusUpdate', {
-//             id: finalResponseId,
-//             status: `Calling tool: ${actualToolCall.name}`,
-//             details: validation.fixedCall ? `Fixed: ${validation.suggestion}` : `Arguments: ${toolCallSummary}${toolCallSummary.length >= 200 ? '...' : ''}`
-//           });
-          
-//           // Execute tool
-//           try {
-//             const toolResult = await mcpClient.callTool(actualToolCall.name, actualToolCall.arguments);
-            
-//             // Add to conversation history
-//             conversationHistory.push({
-//               role: 'assistant',
-//               content: responseContent,
-//               toolCall: actualToolCall,
-//             });
-            
-//             conversationHistory.push({
-//               role: 'tool',
-//               content: `Tool ${actualToolCall.name} executed successfully`,
-//               toolCall: actualToolCall,
-//               toolResult: toolResult,
-//             });
-            
-//             toolCalls.push({
-//               name: actualToolCall.name,
-//               arguments: actualToolCall.arguments,
-//               result: toolResult,
-//             });
-            
-//             // Show tool result status (not the full result)
-//             // const toolResultPreview = JSON.stringify(toolResult, null, 2).substring(0, 100);
-//             // socket.emit('chatStatusUpdate', {
-//             //   id: responseId,
-//             //   status: `Tool '${actualToolCall.name}' completed`,
-//             //   details: `Result received${toolResultPreview.length >= 100 ? ' (truncated)' : ''}`
-//             // });
-            
-//             // Continue loop - don't break, iterate again
-//             continue;
-            
-//           } catch (toolErr: any) {
-//             console.error('Tool execution error:', toolErr);
-            
-//             // Check if this is an MCP server communication error or unknown tool error
-//             const isMCPError = toolErr.message?.includes('MCP tool error') || 
-//                               toolErr.message?.includes('MCP server returned invalid data') ||
-//                               toolErr.message?.includes('unknown tool') ||
-//                               toolErr.message?.includes('Unknown tool');
-            
-//             let errorMessage = toolErr.message;
-//             let shouldContinue = false;
-            
-//             if (isMCPError) {
-//               // Track failed tool - block after first failure for MCP errors
-//               const currentFailures = failedTools.get(actualToolCall.name) || 0;
-//               failedTools.set(actualToolCall.name, currentFailures + 1);
-              
-//               // Check if this is an "unknown tool" error - provide more helpful feedback
-//               const isUnknownTool = toolErr.message?.includes('unknown tool') || toolErr.message?.includes('Unknown tool');
-              
-//               if (isUnknownTool) {
-//                 // For unknown tool errors, tell the model the tool doesn't exist
-//                 errorMessage = `Tool '${actualToolCall.name}' does not exist or is not available. This tool is now BLOCKED. Use only the available tools listed in the tools prompt.`;
-                
-//                 socket.emit('chatStatusUpdate', {
-//                   id: finalResponseId,
-//                   status: `Tool '${actualToolCall.name}' not found`,
-//                   details: `Tool does not exist. Use only available tools.`
-//                 });
-//               } else {
-//                 // This is a server-side issue, add it to conversation history so model can try alternative approach
-//                 errorMessage = `Tool '${actualToolCall.name}' FAILED: ${toolErr.message}. This tool is now BLOCKED and MUST NOT be used again.`;
-                
-//                 socket.emit('chatStatusUpdate', {
-//                   id: finalResponseId,
-//                   status: `Tool '${actualToolCall.name}' failed`,
-//                   details: `Tool blocked after ${currentFailures + 1} failure${currentFailures + 1 > 1 ? 's' : ''}. Trying alternative approach.`
-//                 });
-//               }
-              
-//               shouldContinue = true; // Continue loop so model can try another tool
-//             } else {
-//               // Other errors - show to user and break
-//               socket.emit('chatStatusUpdate', {
-//                 id: finalResponseId,
-//                 status: 'Tool execution failed',
-//                 details: toolErr.message
-//               });
-//             }
-            
-//             // Add error to conversation history
-//             conversationHistory.push({
-//               role: 'user',
-//               content: `[Tool Error] ${errorMessage}`,
-//             });
-            
-//             if (shouldContinue) {
-//               // Continue loop - model might try another tool or provide answer with available info
-//               continue;
-//             } else {
-//               // Break loop for other errors
-//               finalResponse = responseContent + `\n\nTool execution failed: ${toolErr.message}`;
-//               break;
-//             }
-//           }
-//         } else {
-//           // No tool call - check if this is actually a final response or if model is just describing tools
-//           console.log(`Iteration ${iteration}: No tool call detected`);
-          
-//           // Mark that we've detected the final response - stop streaming to agent terminal
-//           // The responseContent already contains everything, but we won't stream more
-//           // We'll send the final response to chat via chatResponseChunk instead
-          
-//           // Check if model mentioned tools but didn't call them (this shouldn't be final)
-//           if (mcpClient && mcpClient.isConnected() && responseContent.length > 0) {
-//             const availableTools = mcpClient.getTools().map((t: any) => t.name);
-//             const mentionedTools = availableTools.filter((toolName: string) => {
-//               const lowerContent = responseContent.toLowerCase();
-//               const lowerToolName = toolName.toLowerCase();
-//               return lowerContent.includes(lowerToolName) ||
-//                      lowerContent.includes(`use ${lowerToolName}`) ||
-//                      lowerContent.includes(`call ${lowerToolName}`) ||
-//                      lowerContent.includes(`need to use ${lowerToolName}`) ||
-//                      lowerContent.includes(`let's use ${lowerToolName}`) ||
-//                      lowerContent.includes(`let's read ${lowerToolName}`) ||
-//                      lowerContent.includes(`we need to use ${lowerToolName}`) ||
-//                      lowerContent.includes(`we should use ${lowerToolName}`) ||
-//                      lowerContent.includes(`read the ${lowerToolName.replace('_', ' ')}`) ||
-//                      lowerContent.includes(`use ${lowerToolName.replace('_', ' ')}`) ||
-//                      (lowerToolName.includes('wiki') && (lowerContent.includes('read wiki') || lowerContent.includes('wiki structure') || lowerContent.includes('wiki contents'))) ||
-//                      (lowerToolName.includes('question') && lowerContent.includes('ask question'));
-//             });
-            
-//             if (mentionedTools.length > 0 && iteration < maxIterations) {
-//               // Model mentioned tools but didn't call them - force it to try again
-//               console.log(`Detected tool mentions in final response without tool call: ${mentionedTools.join(', ')}`);
-              
-//               // Track tool mention errors
-//               const mentionErrorCount = conversationHistory.filter(msg => 
-//                 msg.content.includes('[FORMAT ERROR') || msg.content.includes('[CRITICAL ERROR]')
-//               ).length;
-              
-//               if (mentionErrorCount >= 2) {
-//                 // After 2 attempts, force final answer - don't let it keep trying
-//               socket.emit('chatStatusUpdate', {
-//                 id: responseId,
-//                 status: 'Maximum tool mention errors reached',
-//                 details: 'Providing final answer based on available information.'
-//               });
-                
-//                 // Extract any meaningful content before the tool mention
-//                 let forcedResponse = responseContent.trim();
-//                 forcedResponse = forcedResponse.replace(/^Thinking:\s*/i, '').trim();
-//                 // Remove tool mentions
-//                 for (const toolName of mentionedTools) {
-//                   forcedResponse = forcedResponse.replace(new RegExp(`(?:use|call|need to use|let's use)\\s+${toolName.replace('_', '[-_\\s]+')}`, 'gi'), '').trim();
-//                   forcedResponse = forcedResponse.replace(new RegExp(`(?:use|call)\\s+tool\\s+${toolName.replace('_', '[-_\\s]+')}`, 'gi'), '').trim();
-//                 }
-                
-//                 // If we have meaningful content after cleanup, use it; otherwise use fallback
-//                 if (forcedResponse && forcedResponse.length > 20) {
-//                   finalResponse = forcedResponse;
-//                 } else {
-//                   // Get last tool result and summarize
-//                   const lastToolResult = toolCalls.length > 0 ? toolCalls[toolCalls.length - 1] : null;
-//                   if (lastToolResult) {
-//                     finalResponse = `Based on the tool results, here is the information:\n\n${JSON.stringify(lastToolResult.result, null, 2).substring(0, 1000)}...`;
-//                   } else {
-//                     finalResponse = 'Based on the available information, I have gathered the requested details. Please review the tool results displayed above for complete information.';
-//                   }
-//                 }
-                
-//                 break;
-//               }
-              
-//               socket.emit('chatStatusUpdate', {
-//                 id: responseId,
-//                 status: 'Tool mention error',
-//                 details: `Tools mentioned (${mentionedTools.join(', ')}) but not called. Retrying.`
-//               });
-              
-//               conversationHistory.push({
-//                 role: 'assistant',
-//                 content: responseContent,
-//               });
-//               conversationHistory.push({
-//                 role: 'user',
-//                 content: `[CRITICAL ERROR] You mentioned "${mentionedTools.join(', ')}" but did NOT call them. You have two options:\n1. If you need information, call the tool using JSON format: \`\`\`json\n{"tool_call": {"name": "${mentionedTools[0]}", "arguments": {...}}}\n\`\`\`\n2. If you have enough information to answer, provide your final answer WITHOUT mentioning any tools.\n\nDo NOT just describe what tools you want to use.`,
-//               });
-              
-//               continue; // Try again
-//             }
-//           }
-          
-//           // No tool mentions - this is genuinely a final response
-//           console.log(`Iteration ${iteration}: No tool call detected, conversation complete`);
-          
-//           // Parse structured response to extract Final Answer
-//           const parsedResponse = parseJSONResponse(responseContent);
-          
-//           // Extract answer from JSON if present
-//           let extractedFinalAnswer = '';
-//           if (parsedResponse.finalAnswer) {
-//             try {
-//               const jsonObj = JSON.parse(parsedResponse.finalAnswer);
-//               if (jsonObj.answer) {
-//                 extractedFinalAnswer = jsonObj.answer;
-//               } else {
-//                 extractedFinalAnswer = JSON.stringify(jsonObj, null, 2);
-//               }
-//             } catch (e) {
-//               extractedFinalAnswer = parsedResponse.finalAnswer;
-//             }
-//           }
-          
-//           // Determine final response - prioritize extracted answer, fallback to thinking or full response
-//           if (extractedFinalAnswer && extractedFinalAnswer.length > 10) {
-//             finalResponse = extractedFinalAnswer;
-//           } else if (parsedResponse.hasFinalAnswer && parsedResponse.thinking) {
-//             // If we have a final answer section but couldn't extract it, use thinking as fallback
-//             finalResponse = parsedResponse.thinking;
-//           } else {
-//             // Clean up responseContent - remove any tool call JSON artifacts
-//             let cleanedResponse = responseContent.trim();
-//             cleanedResponse = cleanedResponse.replace(/```json\s*\{[\s\S]*?$/g, '').trim();
-//             cleanedResponse = cleanedResponse.replace(/```\s*\{[\s\S]*?$/g, '').trim();
-//             cleanedResponse = cleanedResponse.replace(/^Thinking:\s*/i, '').trim();
-//             finalResponse = cleanedResponse || responseContent;
-//           }
-          
-//           console.log(`Final response length: ${finalResponse.length} characters`);
-//           console.log(`Final answer start index: ${finalAnswerStartIndex >= 0 ? finalAnswerStartIndex : 'not detected'}`);
-          
-//           // Add final response to history
-//           conversationHistory.push({
-//             role: 'assistant',
-//             content: responseContent,
-//           });
-          
-//           // Only send final response if it wasn't already fully streamed via chunks
-//           // Check if we've streamed the final answer by comparing lengths
-//           const finalAnswerWasStreamed = hasSeenFinalAnswer && lastFinalAnswerStreamedLength > 0;
-          
-//           if (!finalAnswerWasStreamed && finalResponse && finalResponse.trim() && finalResponse.length > 10) {
-//             // Final answer wasn't streamed yet, send it now
-//             socket.emit('chatResponseChunk', {
-//               id: finalResponseId,
-//               chunk: finalResponse,
-//             });
-//           }
-          
-//           break;
-//         }
-//       }
-      
-//       if (iteration >= maxIterations) {
-//         socket.emit('chatStatusUpdate', {
-//           id: finalResponseId,
-//           status: 'Maximum iterations reached',
-//           details: `Stopped after ${maxIterations} iterations.`
-//         });
-//       }
-      
-//       // Ensure finalResponse has content - if it's empty, try to get it from the last iteration's response
-//       if (!finalResponse || finalResponse.trim().length === 0) {
-//         const lastAssistantMsg = [...conversationHistory].reverse().find(msg => msg.role === 'assistant' && msg.content && msg.content.trim());
-//         if (lastAssistantMsg) {
-//           // Parse structured response from last message
-//           const parsedLastMsg = parseJSONResponse(lastAssistantMsg.content);
-//           let extractedAnswer = '';
-//           if (parsedLastMsg.finalAnswer) {
-//             try {
-//               const jsonObj = JSON.parse(parsedLastMsg.finalAnswer);
-//               if (jsonObj.answer) {
-//                 extractedAnswer = jsonObj.answer;
-//               } else {
-//                 extractedAnswer = JSON.stringify(jsonObj, null, 2);
-//               }
-//             } catch (e) {
-//               extractedAnswer = parsedLastMsg.finalAnswer;
-//             }
-//           }
-//           finalResponse = extractedAnswer || parsedLastMsg.thinking || lastAssistantMsg.content;
-//           console.log('Final response was empty, using last assistant message from history');
-//         }
-//       }
-      
-//       // Final safety check - if still empty, provide a default message
-//       if (!finalResponse || finalResponse.trim().length === 0) {
-//         finalResponse = 'The conversation loop completed successfully. Please check the tool results above for detailed information.';
-//         console.log('Final response still empty after fallbacks, using default message');
-//       }
-      
-//       console.log(`Returning final response: length=${finalResponse.length}`);
-//       console.log(`Final answer was streamed: ${hasSeenFinalAnswer && lastFinalAnswerStreamedLength > 0}`);
-      
-//       return { 
-//         finalResponse, 
-//         toolCalls,
-//         finalAnswerStartIndex: finalAnswerStartIndex >= 0 ? finalAnswerStartIndex : undefined,
-//         finalAnswerWasStreamed: hasSeenFinalAnswer && lastFinalAnswerStreamedLength > 0
-//       };
-//     };
 
     // Helper function to stop the shared MCP gateway
     const stopGateway = async (): Promise<void> => {
@@ -4042,41 +2890,290 @@ exec "$@"
       };
     };
 
-    // Helper function to ensure gateway is running with correct config
-    const ensureGatewayRunning = async (enabledServers: string[], privilegedServers: string[], socket: any, responseId?: string): Promise<MCPClient> => {
-      // Check if gateway is already running with same config
-      if (sharedGateway &&
-          arraysEqual(sharedGateway.enabledServers, enabledServers) &&
-          arraysEqual(sharedGateway.privilegedServers, privilegedServers) &&
-          sharedGateway.client.isConnected()) {
-        console.log('Reusing existing MCP gateway (config unchanged)');
-        return sharedGateway.client;
+    // Helper function to parse tool calls from AI response
+    // Looks for JSON code blocks with tool_call format
+    const parseToolCalls = (responseText: string): Array<{ name: string; arguments: any }> => {
+      const toolCalls: Array<{ name: string; arguments: any }> = [];
+      
+      // Match JSON code blocks with tool_call format
+      // Pattern: ```json\n{"tool_call": {"name": "...", "arguments": {...}}}\n```
+      const codeBlockPattern = /```json\s*\n(\{[\s\S]*?\})\s*\n```/g;
+      let match;
+      
+      while ((match = codeBlockPattern.exec(responseText)) !== null) {
+        try {
+          const jsonStr = match[1];
+          const parsed = JSON.parse(jsonStr);
+          
+          // Check if it's a tool_call format
+          if (parsed.tool_call && parsed.tool_call.name) {
+            toolCalls.push({
+              name: parsed.tool_call.name,
+              arguments: parsed.tool_call.arguments || {}
+            });
+          }
+        } catch (err) {
+          console.error('Error parsing potential tool call JSON:', err);
+          // Continue parsing other blocks
+        }
       }
       
-      // Stop old gateway if exists
-      if (sharedGateway) {
-        console.log('Stopping old gateway due to config change');
-        await stopGateway();
+      return toolCalls;
+    };
+
+    // Helper function to execute tool calls via MCP client
+    const executeToolCalls = async (
+      toolCalls: Array<{ name: string; arguments: any }>,
+      mcpClient: MCPClient,
+      socket: any,
+      responseId: string,
+      agentId?: string
+    ): Promise<Array<{ name: string; result: any; error?: string }>> => {
+      const results: Array<{ name: string; result: any; error?: string }> = [];
+      
+      for (const toolCall of toolCalls) {
+        try {
+          console.log(`[TOOL] Executing tool: ${toolCall.name}`);
+          console.log(`   Arguments:`, JSON.stringify(toolCall.arguments, null, 2));
+          
+          // Emit status update
+          socket.emit('chatStatusUpdate', {
+            id: responseId,
+            status: `Executing tool: ${toolCall.name}`,
+            details: `Running ${toolCall.name}...`
+          });
+          
+          // Emit tool execution to terminal
+          emitTerminalOutput('info', `[TOOL] Executing tool: ${toolCall.name}`);
+          
+          // Stream to agent terminal if agentId is provided
+          if (agentId) {
+            io.emit('agentThinkingText', { 
+              agentId, 
+              text: `\n[TOOL] Executing tool: ${toolCall.name}\n` 
+            });
+          }
+          
+          // Execute the tool
+          const result = await mcpClient.callTool(toolCall.name, toolCall.arguments);
+          
+          console.log(`[✓] Tool ${toolCall.name} completed successfully`);
+          emitTerminalOutput('info', `[✓] Tool ${toolCall.name} completed`);
+          
+          if (agentId) {
+            io.emit('agentThinkingText', { 
+              agentId, 
+              text: `[✓] Tool ${toolCall.name} completed\n` 
+            });
+          }
+          
+          results.push({
+            name: toolCall.name,
+            result: result
+          });
+        } catch (err: any) {
+          console.error(`[ERROR] Tool ${toolCall.name} failed:`, err);
+          emitTerminalOutput('error', `[ERROR] Tool ${toolCall.name} failed: ${err.message}`);
+          
+          if (agentId) {
+            io.emit('agentThinkingText', { 
+              agentId, 
+              text: `[ERROR] Tool ${toolCall.name} failed: ${err.message}\n` 
+            });
+          }
+          
+          results.push({
+            name: toolCall.name,
+            result: null,
+            error: err.message
+          });
+        }
       }
       
-      // Notify user that gateway is starting
-      socket.emit('chatStatusUpdate', { 
-        id: responseId || socket.id, 
-        status: 'Loading MCP servers...',
-        details: 'Starting MCP gateway (first time may take 1-2 minutes to pull Docker images)...'
+      return results;
+    };
+
+    // Helper to estimate token count from text (rough estimate: 1 token ≈ 4 characters)
+    const estimateTokens = (text: string): number => {
+      return Math.ceil(text.length / 4);
+    };
+
+    // Helper function to make an AI call (used for both initial and follow-up calls)
+    const makeAICall = async (
+      messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>,
+      model: string,
+      thinkingTokens: number,
+      socket: any,
+      responseId: string,
+      requestId: string,
+      agentId?: string,
+      onChunk?: (chunk: string) => void,
+      contextBreakdown?: { [key: string]: number }
+    ): Promise<{ content: string; tokenUsage: any; timings: any }> => {
+      return new Promise((resolve, reject) => {
+        // Prepare the request body
+        const requestBody: any = {
+          model: model,
+          messages: messages,
+          stream: true,
+          ...(thinkingTokens ? { 
+            max_tokens: thinkingTokens,
+            n_ctx: thinkingTokens  // Set context window size to match thinking tokens
+          } : {})
+        };
+        
+        // Make HTTP POST request
+        const http = require('http');
+        const requestOptions = {
+          hostname: 'localhost',
+          port: 12434,
+          path: '/engines/llama.cpp/v1/chat/completions',
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          timeout: 300000, // 5 minute timeout for vision models
+        };
+        
+        let responseContent = '';
+        let tokenUsageData: any = null;
+        let timingsData: any = null;
+        let buffer = '';
+        let requestTimeout: NodeJS.Timeout;
+        
+        const req = http.request(requestOptions, (res: any) => {
+          console.log(`[AI Call] Response status: ${res.statusCode}`);
+          
+          if (res.statusCode !== 200) {
+            let errorBody = '';
+            res.on('data', (chunk: Buffer) => {
+              errorBody += chunk.toString('utf8');
+            });
+            res.on('end', () => {
+              console.error('[ERROR] HTTP API error:', errorBody);
+              reject(new Error(`Model API error: ${res.statusCode} - ${errorBody}`));
+            });
+            return;
+          }
+          
+          console.log('[AI Call] Starting to receive streaming response...');
+          let chunkCount = 0;
+          
+          // Handle streaming response
+          res.on('data', (chunk: Buffer) => {
+            chunkCount++;
+            const text = chunk.toString('utf8');
+            buffer += text;
+            
+            if (chunkCount === 1) {
+              console.log('[AI Call] First chunk received:', text.substring(0, 200));
+            }
+            
+            const lines = buffer.split('\n');
+            buffer = lines.pop() || '';
+            
+            for (const line of lines) {
+              if (!line.trim() || !line.startsWith('data: ')) continue;
+              
+              const dataStr = line.substring(6).trim();
+              if (dataStr === '[DONE]') {
+                console.log('[AI Call] Received [DONE] marker');
+                continue;
+              }
+              
+              try {
+                const data = JSON.parse(dataStr);
+                
+                if (data.choices && data.choices[0] && data.choices[0].delta) {
+                  const deltaContent = data.choices[0].delta.content || '';
+                  if (deltaContent) {
+                    responseContent += deltaContent;
+                    if (onChunk) onChunk(deltaContent);
+                  }
+                }
+                
+                if (data.usage) tokenUsageData = data.usage;
+                if (data.timings) timingsData = data.timings;
+                
+                if (data.choices && data.choices[0] && data.choices[0].finish_reason) {
+                  console.log('[AI Call] Received finish_reason:', data.choices[0].finish_reason);
+                  if (data.usage) tokenUsageData = data.usage;
+                  if (data.timings) timingsData = data.timings;
+                }
+              } catch (parseError) {
+                console.error('Error parsing SSE data:', parseError);
+                console.error('Problematic line:', line);
+              }
+            }
+          });
+          
+          res.on('end', () => {
+            console.log(`[AI Call] Response stream ended. Total chunks: ${chunkCount}, Response length: ${responseContent.length} chars`);
+            
+            // Clear timeout
+            if (requestTimeout) clearTimeout(requestTimeout);
+            
+            // Process any remaining buffer
+            if (buffer.trim() && buffer.startsWith('data: ')) {
+              const dataStr = buffer.substring(6).trim();
+              if (dataStr !== '[DONE]') {
+                try {
+                  const data = JSON.parse(dataStr);
+                  if (data.usage) tokenUsageData = data.usage;
+                  if (data.timings) timingsData = data.timings;
+                } catch (parseError) {
+                  console.error('Error parsing final buffer:', parseError);
+                }
+              }
+            }
+            
+            console.log('[AI Call] Resolving with response');
+            resolve({
+              content: responseContent,
+              tokenUsage: tokenUsageData,
+              timings: timingsData
+            });
+          });
+          
+          res.on('error', (error: Error) => {
+            console.error('[ERROR] HTTP Response error:', error);
+            if (requestTimeout) clearTimeout(requestTimeout);
+            reject(error);
+          });
+        });
+        
+        req.on('error', (error: Error) => {
+          console.error('[ERROR] HTTP Request error:', error);
+          if (requestTimeout) clearTimeout(requestTimeout);
+          reject(error);
+        });
+        
+        req.on('timeout', () => {
+          console.error('[ERROR] Request timeout - model is taking too long to respond');
+          req.destroy();
+          reject(new Error('Request timeout - the model took too long to process the request. Vision models can be slow; try reducing image size or using a faster model.'));
+        });
+        
+        const requestBodyStr = JSON.stringify(requestBody);
+        console.log(`[AI Call] Sending request to ${requestOptions.hostname}:${requestOptions.port}${requestOptions.path}`);
+        console.log(`[AI Call] Request body size: ${requestBodyStr.length} chars, Model: ${requestBody.model}`);
+        console.log(`[AI Call] Message count: ${requestBody.messages.length}, Has image: ${requestBody.messages.some((m: any) => Array.isArray(m.content) && m.content.some((c: any) => c.type === 'image_url'))}`);
+        
+        req.write(requestBodyStr);
+        req.end();
+        
+        // Set a monitoring timeout to log if request is taking too long
+        requestTimeout = setTimeout(() => {
+          console.log(`[AI Call] Warning: Request has been running for 1 minute, still waiting for response...`);
+        }, 60000);
+        
+        // Store abort handler
+        activeProcesses.set(`${requestId}-ai-call`, req);
       });
-      
-      // Start new gateway
-      console.log('Starting new shared MCP gateway');
-      sharedGateway = await startMCPGateway(enabledServers, privilegedServers);
-      if (!sharedGateway) {
-        throw new Error('Failed to initialize MCP gateway');
-      }
-      return sharedGateway.client;
     };
 
     // Send chat prompt to AI model with MCP tool support
-    socket.on('sendChatPrompt', async ({ requestId, prompt, conversationHistory, model, thinkingTokens, projectPath, containerId, agentId, agentTools, agentPrivilegedTools, agentName, agentNickname, agentJobTitle, userName, userEmail, userNickname, userLanguage, userAge, userGender, userOrientation, userJobTitle, userEmployer, userEducationLevel, userPoliticalIdeology, userReligion, userInterests, userCountry, userState, userZipcode }: { 
+    socket.on('sendChatPrompt', async ({ requestId, prompt, conversationHistory, model, thinkingTokens, projectPath, containerId, agentId, agentTools, agentPrivilegedTools, requestedTools, agentName, agentNickname, agentJobTitle, userName, userEmail, userNickname, userLanguage, userAge, userGender, userOrientation, userJobTitle, userEmployer, userEducationLevel, userPoliticalIdeology, userReligion, userInterests, userCountry, userState, userZipcode, image }: { 
       requestId: string;
       prompt: string;
       conversationHistory?: Array<{ role: 'user' | 'assistant'; content: string }>;
@@ -4087,6 +3184,7 @@ exec "$@"
       agentId?: string;
       agentTools?: string[];
       agentPrivilegedTools?: string[];
+      requestedTools?: string[]; // Tools selected by user for this conversation
       agentName?: string | null;
       agentNickname?: string | null;
       agentJobTitle?: string | null;
@@ -4106,9 +3204,97 @@ exec "$@"
       userCountry?: string | null;
       userState?: string | null;
       userZipcode?: string | null;
+      image?: { data: string; mediaType: string } | null;
     }) => {
       try {
         console.log(`Sending prompt to model ${model} with ${thinkingTokens} thinking tokens`);
+        
+        // Log if image is included
+        if (image) {
+          console.log('[IMAGE] Image received:', {
+            mediaType: image.mediaType,
+            dataLength: image.data.length
+          });
+        }
+        
+        // Filter agent tools based on globally enabled servers
+        const mcpConfigPath = path.join(app.getPath('userData'), 'mcp-config.json');
+        let globallyEnabledServers: string[] = [];
+        let globallyPrivilegedServers: string[] = [];
+        let installedServers: string[] = [];
+        
+        if (fs.existsSync(mcpConfigPath)) {
+          try {
+            const config = JSON.parse(fs.readFileSync(mcpConfigPath, 'utf8'));
+            globallyEnabledServers = config.enabledServers || [];
+            globallyPrivilegedServers = config.privilegedServers || [];
+          } catch (err) {
+            console.error('Error reading MCP config:', err);
+          }
+        }
+        
+        // Get list of installed MCP servers
+        try {
+          const result = require('child_process').execSync('/usr/local/bin/docker mcp server ls --json', {
+            env: { ...process.env, PATH: '/usr/local/bin:/usr/bin:/bin' },
+            encoding: 'utf8'
+          });
+          installedServers = JSON.parse(result);
+        } catch (err) {
+          console.error('Error getting installed MCP servers:', err);
+          // Continue with empty list - will mark all tools as not installed
+        }
+        
+        // Determine effective tools based on global settings and user selection
+        let effectiveTools: string[] = [];
+        let effectivePrivilegedTools: string[] = [];
+        const notInstalledTools: string[] = [];
+        
+        // If user selected specific tools, use only those (that are also globally enabled)
+        // Otherwise, no tools are available by default
+        if (requestedTools && requestedTools.length > 0) {
+          for (const tool of requestedTools) {
+            // Check if tool is installed
+            if (!installedServers.includes(tool)) {
+              notInstalledTools.push(tool);
+              const message = `⚠️ Tool "${tool}" is not installed. Install it using: docker mcp server pull ${tool}`;
+              emitTerminalOutput('warn', message);
+              console.warn(message);
+              continue;
+            }
+            
+            // Check if tool is enabled globally
+            if (globallyEnabledServers.includes(tool)) {
+              // Tool is enabled globally and selected by user
+              effectiveTools.push(tool);
+              // Check if it should be privileged
+              if (globallyPrivilegedServers.includes(tool)) {
+                effectivePrivilegedTools.push(tool);
+              }
+            } else {
+              // Tool is not enabled globally
+              const message = `⚠️ Tool "${tool}" is not enabled globally. Enable it in the AI Tools Manager to use this tool.`;
+              emitTerminalOutput('warn', message);
+              console.warn(message);
+            }
+          }
+          
+          // Log summary of tool selection
+          if (effectiveTools.length > 0) {
+            const message = `[✓] Using ${effectiveTools.length} tool(s): ${effectiveTools.join(', ')}`;
+            emitTerminalOutput('info', message);
+            console.log(message);
+          }
+          
+          if (notInstalledTools.length > 0) {
+            const message = `[WARNING] ${notInstalledTools.length} not installed tool(s): ${notInstalledTools.join(', ')}. Install them to use these tools.`;
+            emitTerminalOutput('warn', message);
+            console.warn(message);
+          }
+        } else {
+          // No tools selected by user - chat will run without tools
+          console.log('[ℹ] No tools selected for this chat');
+        }
         
         // Build the prompt with metadata
         // Only include projectPath if it's provided (agent has Project Path attribute enabled)
@@ -4206,7 +3392,7 @@ exec "$@"
                     })
                       .then(() => ragService.indexGitHubRepoInfo(projectPath))
                       .then(() => {
-                        console.log('✅ Project filesystem and GitHub repo indexed');
+                        console.log('[✓] Project filesystem and GitHub repo indexed');
                       })
                       .catch((indexError) => {
                         console.error('Error auto-indexing project:', indexError);
@@ -4224,10 +3410,10 @@ exec "$@"
               console.log('RAG context length:', ragContext.length, 'characters');
               // Log a preview of what's included
               if (ragContext.includes('[RELEVANT FILESYSTEM FILES]')) {
-                console.log('✅ Filesystem files included in RAG context');
+                console.log('[✓] Filesystem files included in RAG context');
               }
               if (ragContext.includes('[GITHUB REPOSITORY INFORMATION]')) {
-                console.log('✅ GitHub repository information included in RAG context');
+                console.log('[✓] GitHub repository information included in RAG context');
               }
             } else {
               console.log('No RAG context found (this may be normal for first-time queries or unindexed projects)');
@@ -4254,22 +3440,109 @@ exec "$@"
         // Track request start time for latency calculation
         const requestStartTime = Date.now();
         
+        // Determine if tools should be enabled for this conversation
+        // Tools are enabled when:
+        // 1. Agent has tools configured (effectiveTools.length > 0)
+        // 2. User has requested to use tools (requestedTools && requestedTools.length > 0)
+        const shouldEnableTools = effectiveTools.length > 0 && requestedTools && requestedTools.length > 0;
+        
+        // Filter effective tools to only include requested ones
+        const activeTools = shouldEnableTools 
+          ? effectiveTools.filter(tool => requestedTools.includes(tool))
+          : [];
+        
+        // Ensure MCP gateway is running if tools are needed
+        let mcpClient: MCPClient | null = null;
+        if (activeTools.length > 0) {
+          try {
+            console.log(`[TOOL] Tools are active for this conversation: ${activeTools.join(', ')}`);
+            emitTerminalOutput('info', `[TOOL] Activating tools: ${activeTools.join(', ')}`);
+            
+            // Check if shared gateway exists and has the right configuration
+            const needsRestart = !sharedGateway || 
+              !arraysEqual(sharedGateway.enabledServers, activeTools) ||
+              !arraysEqual(sharedGateway.privilegedServers, effectivePrivilegedTools.filter(t => activeTools.includes(t)));
+            
+            if (needsRestart) {
+              // Stop existing gateway if configuration changed
+              if (sharedGateway) {
+                console.log('Restarting MCP gateway with new tool configuration...');
+                await stopGateway();
+              }
+              
+              // Start gateway with requested tools
+              console.log(`Starting MCP gateway with tools: ${activeTools.join(', ')}`);
+              const privilegedActiveTools = effectivePrivilegedTools.filter(t => activeTools.includes(t));
+              sharedGateway = await startMCPGateway(activeTools, privilegedActiveTools);
+              
+              if (!sharedGateway) {
+                throw new Error('Failed to start MCP gateway');
+              }
+            }
+            
+            // TypeScript flow analysis: ensure sharedGateway is not null
+            if (!sharedGateway) {
+              throw new Error('MCP gateway is not initialized');
+            }
+            
+            mcpClient = sharedGateway.client;
+            
+            if (!mcpClient.isConnected()) {
+              throw new Error('MCP client is not connected');
+            }
+            
+            console.log('[✓] MCP gateway is ready and connected');
+            emitTerminalOutput('info', '[✓] MCP gateway ready');
+            
+            // Emit updated tools list to all connected clients
+            if (sharedGateway && sharedGateway.client && sharedGateway.client.isConnected()) {
+              const tools = sharedGateway.client.getTools();
+              const toolNames = tools.map((t: any) => t.name);
+              console.log(`Emitting ${toolNames.length} MCP tools:`, toolNames.join(', '));
+              io.emit('mcpToolsUpdated', toolNames);
+            }
+          } catch (err: any) {
+            console.error('Error setting up MCP gateway:', err);
+            emitTerminalOutput('error', `[ERROR] Failed to setup MCP gateway: ${err.message}`);
+            socket.emit('chatError', `Failed to setup tools: ${err.message}`);
+            return;
+          }
+        }
+        
+        // Track context breakdown for error reporting
+        const contextBreakdown: { [key: string]: number } = {};
+        
         // Build system prompt with agent/user information and RAG context
         const systemPromptParts: string[] = ['You are a helpful assistant.'];
+        contextBreakdown['Base System Prompt'] = estimateTokens(systemPromptParts[0]);
         
         if (agentIdentityInfo) {
           systemPromptParts.push(agentIdentityInfo);
+          contextBreakdown['Agent Identity'] = estimateTokens(agentIdentityInfo);
         }
         if (userInfo) {
           systemPromptParts.push(userInfo);
+          contextBreakdown['User Info'] = estimateTokens(userInfo);
         }
         if (contextInfo) {
           systemPromptParts.push(contextInfo);
+          contextBreakdown['Context Info'] = estimateTokens(contextInfo);
         }
         
         // Add RAG context (filesystem and git repo) to system prompt if available
         if (ragContext) {
           systemPromptParts.push(ragContext);
+          contextBreakdown['RAG/Project Context'] = estimateTokens(ragContext);
+        }
+        
+        // Add tools information to system prompt if tools are active
+        if (mcpClient && activeTools.length > 0) {
+          const toolsPrompt = mcpClient.getToolsPrompt();
+          if (toolsPrompt) {
+            systemPromptParts.push(toolsPrompt);
+            contextBreakdown['MCP Tools Documentation'] = estimateTokens(toolsPrompt);
+            console.log(`Added ${mcpClient.getTools().length} tools to system prompt`);
+          }
         }
         
         const systemPrompt = systemPromptParts.join('\n');
@@ -4286,16 +3559,17 @@ exec "$@"
           // We'll use a conservative limit to ensure we don't exceed context window
           // For most models, we want to leave room for response, so limit to ~75% of context
           const maxHistoryTokens = Math.floor((thinkingTokens || 8192) * 0.75);
-          let currentTokenCount = Math.ceil(systemPrompt.length / 4); // System prompt tokens
-          currentTokenCount += Math.ceil(prompt.length / 4); // Current prompt tokens
+          let currentTokenCount = estimateTokens(systemPrompt); // System prompt tokens
+          currentTokenCount += estimateTokens(prompt); // Current prompt tokens
           
           // Add conversation history messages from oldest to newest
           // Stop if we're approaching token limit
           const historyToInclude: Array<{ role: 'user' | 'assistant'; content: string }> = [];
+          let historyTokens = 0;
           
           for (let i = conversationHistory.length - 1; i >= 0; i--) {
             const msg = conversationHistory[i];
-            const msgTokens = Math.ceil(msg.content.length / 4);
+            const msgTokens = estimateTokens(msg.content);
             
             // Check if adding this message would exceed our limit
             if (currentTokenCount + msgTokens > maxHistoryTokens) {
@@ -4305,246 +3579,347 @@ exec "$@"
             
             historyToInclude.unshift(msg); // Add to beginning to maintain chronological order
             currentTokenCount += msgTokens;
+            historyTokens += msgTokens;
           }
           
           // Add history messages to the array
           messages.push(...historyToInclude);
           
           if (historyToInclude.length > 0) {
-            console.log(`Including ${historyToInclude.length} messages from conversation history`);
+            contextBreakdown['Conversation History'] = historyTokens;
+            console.log(`Including ${historyToInclude.length} messages from conversation history (${historyTokens} tokens)`);
           }
         }
         
-        // Add the current user prompt
-        messages.push({ role: 'user', content: prompt });
+        // Add the current user prompt with optional image
+        if (image) {
+          // If image is provided, use content array format
+          // llama.cpp expects OpenAI vision format (not Anthropic format)
+          const imageContent = [
+            {
+              type: 'text',
+              text: prompt || 'What can you tell me about this image?'
+            },
+            {
+              type: 'image_url',
+              image_url: {
+                url: `data:${image.mediaType};base64,${image.data}`
+              }
+            }
+          ];
+          
+          console.log('Adding image to messages with content:', JSON.stringify({
+            role: 'user',
+            content: imageContent.map(item => 
+              item.type === 'image_url' && item.image_url
+                ? { ...item, image_url: { url: `data:${image.mediaType};base64,<${image.data.length} chars>` } }
+                : item
+            )
+          }));
+          
+          messages.push({ 
+            role: 'user', 
+            content: imageContent as any
+          });
+          contextBreakdown['Current Prompt'] = estimateTokens(prompt) + 1000; // Add estimated tokens for image
+        } else {
+          // Text only
+          messages.push({ role: 'user', content: prompt });
+          contextBreakdown['Current Prompt'] = estimateTokens(prompt);
+        }
         
         // Generate cache key for context caching
         // Use conversation prefix (system prompt + early messages) for caching
         const cacheKey = getCacheKey(agentId || 'global', projectPath, containerId || null, messages);
         
-        // Prepare the request body
-        const requestBody: any = {
-          model: model,
-          messages: messages,
-          stream: true, // Enable streaming
-          // Add context size if the API supports it
-          ...(thinkingTokens ? { max_tokens: thinkingTokens } : {})
-        };
-        
-        // Add cache key if available (some APIs support context caching)
-        if (cacheKey) {
-          // Try cache_key parameter (OpenAI-compatible)
-          requestBody.cache_key = cacheKey;
-          // Also try cache parameter (some llama.cpp variants)
-          requestBody.cache = cacheKey;
-          console.log(`Using context cache key: ${cacheKey.substring(0, 20)}...`);
-        }
-        
-        // Make HTTP POST request
-        const http = require('http');
-        const requestOptions = {
-          hostname: 'localhost',
-          port: 12434,
-          path: '/engines/llama.cpp/v1/chat/completions',
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-        };
-        
-        let responseContent = '';
-        let tokenUsageData: any = null;
-        let timingsData: any = null;
-        let firstChunkReceived = false;
+        // Track first chunk time
         let firstChunkTime: number | null = null;
-        let lastChunkTime: number | null = null;
-        let buffer = ''; // Buffer for incomplete SSE messages
+        let allTokenUsage: any = null;
+        let allTimings: any = null;
         
-        const req = http.request(requestOptions, (res: any) => {
-          if (res.statusCode !== 200) {
-            let errorBody = '';
-            res.on('data', (chunk: Buffer) => {
-              errorBody += chunk.toString('utf8');
-            });
-            res.on('end', () => {
-              console.error('❌ HTTP API error:', errorBody);
-              socket.emit('chatError', `Model API error: ${res.statusCode} - ${errorBody}`);
-            });
-            return;
+        // Make initial AI call with streaming
+        // This will either return a final answer or tool call requests
+        try {
+          const initialResponse = await makeAICall(
+            messages,
+            model,
+            thinkingTokens,
+            socket,
+            responseId,
+            requestId,
+            agentId,
+            (chunk: string) => {
+              // Track first chunk time
+              if (!firstChunkTime) {
+                firstChunkTime = Date.now();
+                socket.emit('firstChunkTime', { requestId, responseId, timestamp: firstChunkTime });
+              }
+              
+              // Stream to agent terminal
+              if (agentId) {
+                io.emit('agentThinkingText', { agentId, text: chunk });
+              }
+              
+              // Stream to chat client
+              socket.emit('chatResponseChunk', {
+                id: responseId,
+                chunk: chunk
+              });
+            }
+          );
+          
+          // Store token usage and timings from initial response
+          allTokenUsage = initialResponse.tokenUsage;
+          allTimings = initialResponse.timings;
+          
+          console.log('Initial AI response complete, checking for tool calls...');
+          
+          // Check if the response contains tool call requests
+          const toolCalls = mcpClient && activeTools.length > 0 
+            ? parseToolCalls(initialResponse.content)
+            : [];
+          
+          if (toolCalls.length > 0) {
+            console.log(`Found ${toolCalls.length} tool call(s) in response`);
+            emitTerminalOutput('info', `📋 Agent wants to use ${toolCalls.length} tool(s)`);
+            
+            // Execute all tool calls
+            const toolResults = await executeToolCalls(
+              toolCalls,
+              mcpClient!,
+              socket,
+              responseId,
+              agentId
+            );
+            
+            // Build tool results context for the AI
+            const toolResultsText = toolResults.map(result => {
+              if (result.error) {
+                return `Tool: ${result.name}\nStatus: Error\nError: ${result.error}`;
+              } else {
+                return `Tool: ${result.name}\nStatus: Success\nResult: ${JSON.stringify(result.result, null, 2)}`;
+              }
+            }).join('\n\n');
+            
+            console.log('Tool execution complete, requesting final answer from AI...');
+            emitTerminalOutput('info', '🤖 Generating final answer with tool results...');
+            
+            // Add the initial response with tool calls to conversation
+            messages.push({ role: 'assistant', content: initialResponse.content });
+            
+            // Add tool results as a user message
+            const toolResultsMessage = `Here are the results from the tools you requested:\n\n${toolResultsText}\n\nPlease provide your final answer to the user based on these tool results.`;
+            messages.push({ role: 'user', content: toolResultsMessage });
+            
+            // Track tool results in context breakdown
+            contextBreakdown['Tool Results'] = estimateTokens(toolResultsMessage);
+            
+            // Make follow-up call to get final answer
+            const finalResponse = await makeAICall(
+              messages,
+              model,
+              thinkingTokens,
+              socket,
+              responseId,
+              requestId,
+              agentId,
+              (chunk: string) => {
+                // Stream final response to agent terminal
+                if (agentId) {
+                  io.emit('agentThinkingText', { agentId, text: chunk });
+                }
+                
+                // Stream to chat client
+                socket.emit('chatResponseChunk', {
+                  id: responseId,
+                  chunk: chunk
+                });
+              }
+            );
+            
+            // Accumulate token usage from both calls
+            if (finalResponse.tokenUsage) {
+              if (allTokenUsage) {
+                allTokenUsage.prompt_tokens = (allTokenUsage.prompt_tokens || 0) + (finalResponse.tokenUsage.prompt_tokens || 0);
+                allTokenUsage.completion_tokens = (allTokenUsage.completion_tokens || 0) + (finalResponse.tokenUsage.completion_tokens || 0);
+                allTokenUsage.total_tokens = (allTokenUsage.total_tokens || 0) + (finalResponse.tokenUsage.total_tokens || 0);
+              } else {
+                allTokenUsage = finalResponse.tokenUsage;
+              }
+            }
+            
+            if (finalResponse.timings) {
+              allTimings = finalResponse.timings; // Use latest timings
+            }
+            
+            console.log('[✓] Final answer generated with tool results');
           }
           
-          // Handle streaming response
-          res.on('data', (chunk: Buffer) => {
-            const text = chunk.toString('utf8');
-            // Append to buffer
-            buffer += text;
-            
-            // Process complete lines (SSE messages end with \n)
-            const lines = buffer.split('\n');
-            // Keep the last incomplete line in buffer
-            buffer = lines.pop() || '';
-            
-            for (const line of lines) {
-              if (!line.trim()) continue; // Skip empty lines
-              
-              if (line.startsWith('data: ')) {
-                const dataStr = line.substring(6).trim(); // Remove 'data: ' prefix
-                
-                if (dataStr === '[DONE]') {
-                  // Stream complete
-                  continue;
-                }
-                
-                try {
-                  const data = JSON.parse(dataStr);
-                  
-                  // Track first chunk for latency
-                  if (!firstChunkReceived) {
-                    firstChunkReceived = true;
-                    firstChunkTime = Date.now();
-                    // Emit first chunk time to frontend
-                    socket.emit('firstChunkTime', { requestId, responseId, timestamp: firstChunkTime });
-                  }
-                  lastChunkTime = Date.now();
-                  
-                  // Extract content delta
-                  if (data.choices && data.choices[0] && data.choices[0].delta) {
-                    const deltaContent = data.choices[0].delta.content || '';
-                    if (deltaContent) {
-                      responseContent += deltaContent;
-                      
-                      // Stream content to agent terminal if agentId is provided
-                      if (agentId) {
-                        io.emit('agentThinkingText', { agentId, text: deltaContent });
-                      }
-                      
-                      // Stream content to chat client
-                      socket.emit('chatResponseChunk', {
-                        id: responseId,
-                        chunk: deltaContent
-                      });
-                    }
-                  }
-                  
-                  // Extract token usage from response (if available - usually only in non-streaming)
-                  if (data.usage) {
-                    tokenUsageData = data.usage;
-                  }
-                  
-                  // Extract timings from response (available in streaming mode)
-                  if (data.timings) {
-                    timingsData = data.timings;
-                  }
-                  
-                  // Check for finish_reason to get final token usage and timings
-                  if (data.choices && data.choices[0] && data.choices[0].finish_reason) {
-                    // Final chunk - token usage and timings should be in this response
-                    if (data.usage) {
-                      tokenUsageData = data.usage;
-                    }
-                    if (data.timings) {
-                      timingsData = data.timings;
-                    }
-                  }
-                } catch (parseError) {
-                  console.error('Error parsing SSE data:', parseError);
-                }
-              }
-            }
+          // Calculate and emit final token usage
+          let promptTokens = 0;
+          let completionTokens = 0;
+          let totalTokens = 0;
+          
+          if (allTokenUsage) {
+            promptTokens = allTokenUsage.prompt_tokens || 0;
+            completionTokens = allTokenUsage.completion_tokens || 0;
+            totalTokens = allTokenUsage.total_tokens || (promptTokens + completionTokens);
+          } else if (allTimings) {
+            promptTokens = allTimings.prompt_n || 0;
+            completionTokens = allTimings.predicted_n || 0;
+            totalTokens = promptTokens + completionTokens;
+          } else {
+            const totalChars = messages.reduce((sum, msg) => sum + msg.content.length, 0);
+            promptTokens = Math.ceil(totalChars / 4);
+            completionTokens = 0;
+            totalTokens = promptTokens;
+          }
+          
+          const maxContext = thinkingTokens;
+          const usagePercent = maxContext > 0 ? Math.round((totalTokens / maxContext) * 100) : 0;
+          
+          socket.emit('tokenUsage', {
+            requestId: requestId,
+            promptTokens: promptTokens,
+            completionTokens: completionTokens,
+            totalTokens: totalTokens,
+            maxContext: maxContext,
+            usagePercent: usagePercent,
+            requestedContext: thinkingTokens,
+            timings: allTimings,
           });
           
-          res.on('end', async () => {
-            // Process any remaining buffer content
-            if (buffer.trim()) {
-              const line = buffer.trim();
-              if (line.startsWith('data: ')) {
-                const dataStr = line.substring(6).trim();
-                if (dataStr !== '[DONE]') {
-                  try {
-                    const data = JSON.parse(dataStr);
-                    if (data.usage) {
-                      tokenUsageData = data.usage;
-                    }
-                    if (data.timings) {
-                      timingsData = data.timings;
-                    }
-                  } catch (parseError) {
-                    console.error('Error parsing final buffer:', parseError);
-                  }
-                }
-              }
-            }
-            
-            // Calculate token counts from timings if usage is not available
-            let promptTokens = 0;
-            let completionTokens = 0;
-            let totalTokens = 0;
-            
-            if (tokenUsageData) {
-              // Use usage data if available
-              promptTokens = tokenUsageData.prompt_tokens || 0;
-              completionTokens = tokenUsageData.completion_tokens || 0;
-              totalTokens = tokenUsageData.total_tokens || (promptTokens + completionTokens);
-            } else if (timingsData) {
-              // Calculate from timings data (prompt_n and predicted_n)
-              promptTokens = timingsData.prompt_n || 0;
-              completionTokens = timingsData.predicted_n || 0;
-              totalTokens = promptTokens + completionTokens;
-            } else {
-              // Fallback: estimate from messages array length
-              const totalChars = messages.reduce((sum, msg) => sum + msg.content.length, 0);
-              promptTokens = Math.ceil(totalChars / 4);
-              completionTokens = 0;
-              totalTokens = promptTokens;
-            }
-            
-            const maxContext = thinkingTokens;
-            const usagePercent = maxContext > 0 ? Math.round((totalTokens / maxContext) * 100) : 0;
-            
-            socket.emit('tokenUsage', {
-              requestId: requestId,
-              promptTokens: promptTokens,
-              completionTokens: completionTokens,
-              totalTokens: totalTokens,
-              maxContext: maxContext,
-              usagePercent: usagePercent,
-              requestedContext: thinkingTokens,
-              timings: timingsData, // Include timings data
-            });
-            
-            // Remove from active processes
-            activeProcesses.delete(requestId);
-            
-            // Send completion marker
-            socket.emit('chatResponse', {
-              id: responseId,
-              requestId: requestId,
-              content: '', // Empty because it was already streamed via chunks
-              timestamp: new Date(),
-              wasStreamed: true,
-            });
-          });
-          
-          res.on('error', (error: Error) => {
-            console.error('❌ HTTP Response error:', error);
-            activeProcesses.delete(requestId);
-            socket.emit('chatError', `Model API error: ${error.message}`);
-          });
-        });
-        
-        req.on('error', (error: Error) => {
-          console.error('❌ HTTP Request error:', error);
+          // Remove from active processes
           activeProcesses.delete(requestId);
-          socket.emit('chatError', `Failed to connect to model API: ${error.message}`);
-        });
-        
-        // Send the request
-        req.write(JSON.stringify(requestBody));
-        req.end();
-        
-        // Store abort handler
-        activeProcesses.set(requestId, req as any); // Store request for abort
-        
+          activeProcesses.delete(`${requestId}-ai-call`);
+          
+          // Send completion marker
+          socket.emit('chatResponse', {
+            id: responseId,
+            requestId: requestId,
+            content: '',
+            timestamp: new Date(),
+            wasStreamed: true,
+          });
+          
+        } catch (error: any) {
+          console.error('Error in AI call or tool execution:', error);
+          activeProcesses.delete(requestId);
+          activeProcesses.delete(`${requestId}-ai-call`);
+          
+          // Check if this is a context size error
+          const errorMessage = error.message || '';
+          if (errorMessage.includes('exceed_context_size_error') || 
+              errorMessage.includes('exceeds the available context size') ||
+              errorMessage.includes('context size')) {
+            
+            // Try to parse the actual values from the error message
+            let promptTokens = 'unknown';
+            let contextLimit = 'unknown';
+            
+            // Look for JSON error details in the message
+            const jsonMatch = errorMessage.match(/\{[^}]*"n_prompt_tokens"[^}]*\}/);
+            if (jsonMatch) {
+              try {
+                const errorDetails = JSON.parse(jsonMatch[0]);
+                if (errorDetails.n_prompt_tokens) {
+                  promptTokens = errorDetails.n_prompt_tokens.toString();
+                }
+                if (errorDetails.n_ctx) {
+                  contextLimit = errorDetails.n_ctx.toString();
+                }
+              } catch (e) {
+                // Couldn't parse, use generic message
+              }
+            }
+            
+            // Build dynamic error message with detailed breakdown
+            let errorText = `⚠️ Context Size Exceeded\n\n` +
+              `The request is too large for the current context window.\n\n`;
+            
+            // Show configuration details
+            errorText += `⚙️ **Current Configuration:**\n` +
+              `- "Thinking Tokens" setting: ${thinkingTokens.toLocaleString()} tokens\n` +
+              `- Actual context limit: ${contextLimit !== 'unknown' ? contextLimit : thinkingTokens.toLocaleString()} tokens\n\n`;
+            
+            // Show what we tried to load with breakdown
+            if (promptTokens !== 'unknown') {
+              const promptTokensNum = parseInt(promptTokens);
+              const exceedBy = contextLimit !== 'unknown' 
+                ? promptTokensNum - parseInt(contextLimit)
+                : 'unknown';
+              
+              errorText += `📊 **What We Tried to Load:**\n` +
+                `- Total content size: ${promptTokensNum.toLocaleString()} tokens\n`;
+              
+              if (exceedBy !== 'unknown' && exceedBy > 0) {
+                errorText += `- **Exceeds limit by: ${exceedBy.toLocaleString()} tokens** (${Math.round((exceedBy / parseInt(contextLimit)) * 100)}% over)\n`;
+              }
+              errorText += '\n';
+            }
+            
+            // Add detailed breakdown if available (stored in outer scope)
+            // This will be populated from the context tracking code
+            errorText += `📋 **Content Breakdown:**\n`;
+            if (typeof contextBreakdown !== 'undefined' && Object.keys(contextBreakdown).length > 0) {
+              // Sort by size (largest first) to show what's taking up the most space
+              const sortedBreakdown = Object.entries(contextBreakdown).sort((a, b) => b[1] - a[1]);
+              const totalEstimated = sortedBreakdown.reduce((sum, [_, tokens]) => sum + tokens, 0);
+              
+              for (const [component, tokens] of sortedBreakdown) {
+                const percentage = totalEstimated > 0 ? Math.round((tokens / totalEstimated) * 100) : 0;
+                errorText += `- ${component}: ${tokens.toLocaleString()} tokens (${percentage}%)\n`;
+              }
+              errorText += `- **Total (estimated): ${totalEstimated.toLocaleString()} tokens**\n\n`;
+            } else {
+              errorText += `(Breakdown not available - error occurred during message construction)\n\n`;
+            }
+            
+            // Calculate recommended context size
+            const recommendedSize = promptTokens !== 'unknown' 
+              ? Math.max(Math.ceil(parseInt(promptTokens) * 1.5 / 1024) * 1024, 16384)
+              : Math.max(thinkingTokens * 2, 16384);
+            
+            errorText += `💡 **Solutions (choose one):**\n\n` +
+              `**Option 1: Increase Context Window (Recommended)**\n` +
+              `- Go to Agent Settings\n` +
+              `- Increase "Thinking Tokens" to **${recommendedSize.toLocaleString()}** or higher\n` +
+              `- Current: ${thinkingTokens.toLocaleString()} → Recommended: ${recommendedSize.toLocaleString()}\n\n` +
+              `**Option 2: Reduce Input Size**\n` +
+              `- Clear conversation history (click "New" button)\n` +
+              `- Use a shorter prompt\n` +
+              `- Disable some MCP tools if active\n` +
+              `- Reduce RAG/project context\n\n` +
+              `**Option 3: Use Fewer Tools**\n` +
+              `- Deselect some tools in the Tools dropdown\n` +
+              `- Tool results can be very large\n`;
+            
+            // Send user-friendly context size error
+            socket.emit('chatError', errorText);
+          } else if (errorMessage.includes('Failed to load image') || 
+                     errorMessage.includes('image or audio file') ||
+                     errorMessage.includes('unsupported content')) {
+            // Image-related error - model doesn't support vision
+            const imageErrorText = `⚠️ Vision Not Supported\n\n` +
+              `The current model doesn't support image inputs.\n\n` +
+              `💡 **Solutions:**\n\n` +
+              `**Option 1: Use a Vision Model**\n` +
+              `- Load a vision-capable model (e.g., LLaVA, BakLLaVA)\n` +
+              `- Go to Models tab to load a different model\n` +
+              `- Vision models have names containing "vision", "llava", or "multimodal"\n\n` +
+              `**Option 2: Send Text Only**\n` +
+              `- Remove the image attachment\n` +
+              `- Send your message as text only\n` +
+              `- Describe the image contents in your prompt instead\n\n` +
+              `📝 **Note:** Most language models only support text. You need a specialized ` +
+              `vision model to analyze images.`;
+            
+            socket.emit('chatError', imageErrorText);
+          } else {
+            // Generic error message
+            socket.emit('chatError', `Failed to process request: ${error.message}`);
+          }
+        }
       } catch (error) {
         console.error('Error sending chat prompt:', error);
         socket.emit('chatError', 'Failed to send prompt to AI model.');
@@ -4723,6 +4098,41 @@ exec "$@"
 
     socket.on('getMCPServers', getMCPServers);
 
+    // Helper to emit available MCP tools from the current gateway
+    const emitMCPTools = () => {
+      if (sharedGateway && sharedGateway.client && sharedGateway.client.isConnected()) {
+        const tools = sharedGateway.client.getTools();
+        const toolNames = tools.map((t: any) => t.name);
+        console.log(`Emitting ${toolNames.length} MCP tools:`, toolNames.join(', '));
+        io.emit('mcpToolsUpdated', toolNames);
+      } else {
+        console.log('No MCP gateway connected, emitting empty tools list');
+        io.emit('mcpToolsUpdated', []);
+      }
+    };
+
+    // Get current MCP tools from gateway
+    socket.on('getMCPTools', () => {
+      emitMCPTools();
+    });
+
+    // Refresh MCP tools (re-fetch from gateway)
+    socket.on('refreshMCPTools', async () => {
+      if (sharedGateway && sharedGateway.client && sharedGateway.client.isConnected()) {
+        try {
+          console.log('Refreshing MCP tools from gateway...');
+          await sharedGateway.client.refreshTools();
+          emitMCPTools();
+        } catch (err) {
+          console.error('Error refreshing MCP tools:', err);
+          io.emit('mcpToolsUpdated', []);
+        }
+      } else {
+        console.log('Cannot refresh tools: no MCP gateway connected');
+        io.emit('mcpToolsUpdated', []);
+      }
+    });
+
     socket.on('toggleMCPServer', ({ serverName, enable }: { serverName: string; enable: boolean }) => {
       try {
         console.log(`Toggling MCP server ${serverName} to ${enable ? 'enabled' : 'disabled'}`);
@@ -4758,6 +4168,11 @@ exec "$@"
         
         // Refresh the server list to show updated enabled states
         getMCPServers();
+        
+        // Notify that tools may have changed (gateway will be restarted on next use)
+        // Emit empty tools list since gateway needs to be restarted
+        console.log('MCP servers changed, tools will be updated on next gateway start');
+        io.emit('mcpToolsUpdated', []);
       } catch (error) {
         console.error('Error toggling MCP server:', error);
         socket.emit('mcpError', 'Failed to toggle MCP server.');
@@ -4799,6 +4214,10 @@ exec "$@"
         
         // Refresh the server list to show updated privileged states
         getMCPServers();
+        
+        // Notify that tools may have changed (gateway will be restarted on next use)
+        console.log('MCP server privileged mode changed, tools will be updated on next gateway start');
+        io.emit('mcpToolsUpdated', []);
       } catch (error) {
         console.error('Error toggling MCP server privileged mode:', error);
         socket.emit('mcpError', 'Failed to toggle MCP server privileged mode.');
@@ -5093,7 +4512,7 @@ exec "$@"
           }
         })
           .then((fileCount) => {
-            console.log(`✅ Reloaded RAG context: ${fileCount} files indexed for container ${containerId}`);
+            console.log(`[✓] Reloaded RAG context: ${fileCount} files indexed for container ${containerId}`);
             socket.emit('ragReloaded', { containerId, fileCount });
           })
           .catch((indexError) => {
@@ -5107,8 +4526,16 @@ exec "$@"
             }
           });
       } catch (error: any) {
-        console.error('Error reloading container RAG:', error);
-        socket.emit('ragError', error.message || 'Failed to reload RAG');
+        // Check if container doesn't exist (404)
+        if (error.statusCode === 404 || error.reason === 'no such container') {
+          // Container was deleted - emit error so frontend can clear the selection
+          console.log(`Container ${containerId.substring(0, 12)} no longer exists - skipping RAG reload`);
+          socket.emit('containerNotFound', { containerId });
+        } else {
+          // Other error
+          console.error('Error reloading container RAG:', error);
+          socket.emit('ragError', error.message || 'Failed to reload RAG');
+        }
       }
     });
 
@@ -5156,7 +4583,7 @@ exec "$@"
         });
         await ragService.indexGitHubRepoInfo(projectPath);
         
-        console.log(`✅ Manually indexed ${fileCount} files from project filesystem`);
+        console.log(`[✓] Manually indexed ${fileCount} files from project filesystem`);
         socket.emit('indexingStatus', { status: 'complete', projectPath, fileCount });
       } catch (error: any) {
         console.error('Error manually indexing project:', error);
@@ -5192,7 +4619,7 @@ exec "$@"
           }
         });
         
-        console.log(`✅ Manually indexed ${fileCount} files from container filesystem`);
+        console.log(`[✓] Manually indexed ${fileCount} files from container filesystem`);
         socket.emit('indexingStatus', { status: 'complete', containerId, fileCount });
       } catch (error: any) {
         console.error('Error manually indexing container:', error);

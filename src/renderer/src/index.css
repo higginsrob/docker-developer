@@ -64,6 +64,8 @@
 /* width */
 .xterm .xterm-viewport::-webkit-scrollbar,
 .overflow-y-auto::-webkit-scrollbar,
+.chat-messages::-webkit-scrollbar,
+textarea::-webkit-scrollbar,
 .overflow-auto::-webkit-scrollbar,
 .overflow-x-auto::-webkit-scrollbar {
   width: 10px;
@@ -72,6 +74,8 @@
 /* Track */
 .xterm .xterm-viewport::-webkit-scrollbar-track,
 .overflow-y-auto::-webkit-scrollbar-track,
+.chat-messages::-webkit-scrollbar-track,
+textarea::-webkit-scrollbar-track,
 .overflow-auto::-webkit-scrollbar-track,
 .overflow-x-auto::-webkit-scrollbar-track {
   background: #343434;
@@ -80,6 +84,8 @@
 /* Handle */
 .xterm .xterm-viewport::-webkit-scrollbar-thumb,
 .overflow-y-auto::-webkit-scrollbar-thumb,
+.chat-messages::-webkit-scrollbar-thumb,
+textarea::-webkit-scrollbar-thumb,
 .overflow-auto::-webkit-scrollbar-thumb,
 .overflow-x-auto::-webkit-scrollbar-thumb {
   background: #565656;
@@ -88,7 +94,14 @@
 /* Handle on hover */
 .xterm .xterm-viewport::-webkit-scrollbar-thumb:hover,
 .overflow-y-auto::-webkit-scrollbar-thumb:hover,
+.chat-messages::-webkit-scrollbar-thumb:hover,
+textarea::-webkit-scrollbar-thumb:hover,
 .overflow-auto::-webkit-scrollbar-thumb:hover,
 .overflow-x-auto::-webkit-scrollbar-thumb:hover {
   background: #555;
+}
+
+.prompt-input textarea {
+  resize: none !important;
+  form-sizing: normal;
 }

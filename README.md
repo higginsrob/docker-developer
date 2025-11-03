@@ -2,13 +2,9 @@
 
 A powerful Electron-based desktop application for managing Docker containers, AI models, and development workflows with integrated AI assistance and intelligent context awareness.
 
-[![Build and Release](https://github.com/higginsrob/docker-developer/actions/workflows/build-and-release.yml/badge.svg)](https://github.com/higginsrob/docker-developer/actions/workflows/build-and-release.yml)
-
-
 [![Version](https://img.shields.io/github/v/release/higginsrob/docker-developer?label=version)](https://github.com/higginsrob/docker-developer/releases/latest)
 [![License](https://img.shields.io/badge/license-ISC-green.svg)](LICENSE)
-[![Build Status](https://img.shields.io/github/actions/workflow/status/higginsrob/docker-developer/build-and-release.yml?branch=main)](https://github.com/higginsrob/docker-developer/actions)
-[![Tests](https://img.shields.io/github/actions/workflow/status/higginsrob/docker-developer/test.yml?label=tests)](https://github.com/higginsrob/docker-developer/actions)
+[![Build and Release](https://github.com/higginsrob/docker-developer/actions/workflows/build-and-release.yml/badge.svg)](https://github.com/higginsrob/docker-developer/actions/workflows/build-and-release.yml)
 [![Downloads](https://img.shields.io/github/downloads/higginsrob/docker-developer/total)](https://github.com/higginsrob/docker-developer/releases)
 [![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey.svg)](#-installation)
 

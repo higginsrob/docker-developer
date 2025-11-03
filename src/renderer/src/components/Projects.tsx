@@ -1,6 +1,13 @@
 import React, { useEffect, useState, useCallback, useMemo } from 'react';
 import io from 'socket.io-client';
 import { SelectedContext } from './ChatPanel';
+import {
+  MagnifyingGlassIcon,
+  FolderIcon,
+  CommandLineIcon,
+  TrashIcon,
+  CheckIcon,
+} from '@heroicons/react/24/outline';
 
 const socket = io('http://localhost:3002');
 
@@ -133,12 +140,15 @@ const Projects: React.FC<ProjectsProps> = ({ selectedContext, onContextSelect, o
         {/* Search Bar */}
         <div className="flex items-center space-x-3">
           <div className="flex-1 relative">
+            <div className="absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-500">
+              <MagnifyingGlassIcon className="w-5 h-5" />
+            </div>
             <input
               type="text"
-              placeholder="🔍 Filter by project name..."
+              placeholder="Filter by project name..."
               value={filter}
               onChange={(e) => setFilter(e.target.value)}
-              className="w-full px-4 py-3 pl-4 border border-gray-600 rounded-lg bg-gray-800 text-gray-200 placeholder-gray-500 focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none transition-all"
+              className="w-full px-4 py-3 pl-10 border border-gray-600 rounded-lg bg-gray-800 text-gray-200 placeholder-gray-500 focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none transition-all"
             />
           </div>
           <div className="text-sm text-gray-400">
@@ -199,7 +209,7 @@ const Projects: React.FC<ProjectsProps> = ({ selectedContext, onContextSelect, o
                   >
                     <td className="px-6 py-4">
                       <div className="flex items-center space-x-2">
-                        <span className="text-2xl">📁</span>
+                        <FolderIcon className="w-5 h-5 text-blue-400" />
                         <div className="flex flex-col">
                           <span className="font-medium text-gray-100">
                             {getProjectName(project.path)}
@@ -252,14 +262,15 @@ const Projects: React.FC<ProjectsProps> = ({ selectedContext, onContextSelect, o
                             }
                           }}
                           disabled={!project.exists}
-                          className={`px-3 py-1.5 rounded-md text-sm font-medium transition-colors ${
+                          className={`px-3 py-1.5 rounded-md text-sm font-medium transition-colors flex items-center space-x-1 ${
                             !project.exists
                               ? 'bg-gray-700 text-gray-500 cursor-not-allowed'
                               : 'bg-blue-600 text-white hover:bg-blue-700'
                           }`}
                           title="Open shell in terminal"
                         >
-                          💻 Shell
+                          <CommandLineIcon className="w-4 h-4" />
+                          <span>Shell</span>
                         </button>
                         <button
                           onClick={(e) => {
@@ -267,7 +278,7 @@ const Projects: React.FC<ProjectsProps> = ({ selectedContext, onContextSelect, o
                             handleSetSelectedProject(project.path);
                           }}
                           disabled={!project.exists}
-                          className={`px-3 py-1.5 rounded-md text-sm font-medium transition-colors ${
+                          className={`px-3 py-1.5 rounded-md text-sm font-medium transition-colors flex items-center space-x-1 ${
                             isSelected
                               ? 'bg-green-600 text-white cursor-default'
                               : !project.exists
@@ -275,16 +286,18 @@ const Projects: React.FC<ProjectsProps> = ({ selectedContext, onContextSelect, o
                               : 'bg-green-600 text-white hover:bg-green-700'
                           }`}
                         >
-                          {isSelected ? '✓ Select' : 'Select'}
+                          {isSelected && <CheckIcon className="w-4 h-4" />}
+                          <span>{isSelected ? 'Selected' : 'Select'}</span>
                         </button>
                         <button
                           onClick={(e) => {
                             e.stopPropagation();
                             handleRemoveProject(project.path);
                           }}
-                          className="px-3 py-1.5 rounded-md text-sm font-medium transition-colors bg-red-600 text-white hover:bg-red-700"
+                          className="px-3 py-1.5 rounded-md text-sm font-medium transition-colors bg-red-600 text-white hover:bg-red-700 flex items-center space-x-1"
                         >
-                          🗑️ Remove
+                          <TrashIcon className="w-4 h-4" />
+                          <span>Remove</span>
                         </button>
                       </div>
                     </td>

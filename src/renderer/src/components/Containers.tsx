@@ -2,6 +2,16 @@ import React, { useEffect, useState, useMemo } from 'react';
 import io from 'socket.io-client';
 import ContainerDetail from './ContainerDetail';
 import { SelectedContext } from './ChatPanel';
+import {
+  MagnifyingGlassIcon,
+  CommandLineIcon,
+  TrashIcon,
+  ServerStackIcon,
+  PlayIcon,
+  StopIcon,
+  DocumentTextIcon,
+  CheckIcon,
+} from '@heroicons/react/24/outline';
 
 const socket = io('http://localhost:3002');
 
@@ -102,12 +112,15 @@ const Containers: React.FC<ContainersProps> = ({ selectedContext, onContextSelec
         {/* Search Bar */}
         <div className="flex items-center space-x-3">
           <div className="flex-1 relative">
+            <div className="absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-500">
+              <MagnifyingGlassIcon className="w-5 h-5" />
+            </div>
             <input
               type="text"
-              placeholder="🔍 Filter by container name..."
+              placeholder="Filter by container name..."
               value={filter}
               onChange={(e) => setFilter(e.target.value)}
-              className="w-full px-4 py-3 pl-4 border border-gray-600 rounded-lg bg-gray-800 text-gray-200 placeholder-gray-500 focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none transition-all"
+              className="w-full px-4 py-3 pl-10 border border-gray-600 rounded-lg bg-gray-800 text-gray-200 placeholder-gray-500 focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none transition-all"
             />
           </div>
           <div className="text-sm text-gray-400">
@@ -119,7 +132,7 @@ const Containers: React.FC<ContainersProps> = ({ selectedContext, onContextSelec
       {/* Containers Table */}
       {containers.length === 0 ? (
         <div className="bg-gray-800 rounded-xl shadow-sm border border-gray-700 p-12 text-center">
-          <div className="text-6xl mb-4">🐳</div>
+          <ServerStackIcon className="w-16 h-16 mx-auto mb-4 text-gray-500" />
           <h3 className="text-xl font-semibold text-gray-200 mb-2">No Containers</h3>
           <p className="text-gray-400">No Docker containers found</p>
         </div>
@@ -176,7 +189,7 @@ const Containers: React.FC<ContainersProps> = ({ selectedContext, onContextSelec
                   >
                     <td className="px-6 py-4">
                       <div className="flex items-center space-x-2">
-                        <span className="text-2xl">🐳</span>
+                        <ServerStackIcon className="w-5 h-5 text-blue-400" />
                         <span className="font-medium text-gray-100">
                           {container.Names[0].substring(1)}
                         </span>
@@ -219,14 +232,15 @@ const Containers: React.FC<ContainersProps> = ({ selectedContext, onContextSelec
                             }
                           }}
                           disabled={container.State !== 'running'}
-                          className={`px-3 py-1.5 rounded-md text-sm font-medium transition-colors ${
+                          className={`px-3 py-1.5 rounded-md text-sm font-medium transition-colors flex items-center space-x-1 ${
                             container.State !== 'running'
                               ? 'bg-gray-700 text-gray-500 cursor-not-allowed'
                               : 'bg-blue-600 text-white hover:bg-blue-700'
                           }`}
                           title="Open shell in terminal"
                         >
-                          💻 Shell
+                          <CommandLineIcon className="w-4 h-4" />
+                          <span>Shell</span>
                         </button>
                         <button
                           onClick={(e) => {
@@ -243,7 +257,7 @@ const Containers: React.FC<ContainersProps> = ({ selectedContext, onContextSelec
                             }
                           }}
                           disabled={container.State !== 'running'}
-                          className={`px-3 py-1.5 rounded-md text-sm font-medium transition-colors ${
+                          className={`px-3 py-1.5 rounded-md text-sm font-medium transition-colors flex items-center space-x-1 ${
                             container.State !== 'running'
                               ? 'bg-gray-700 text-gray-500 cursor-not-allowed'
                               : isSelected
@@ -252,7 +266,8 @@ const Containers: React.FC<ContainersProps> = ({ selectedContext, onContextSelec
                           }`}
                           title="Open file editor"
                         >
-                          {isSelected ? '✓ Editor' : '📝 Editor'}
+                          {isSelected ? <CheckIcon className="w-4 h-4" /> : <DocumentTextIcon className="w-4 h-4" />}
+                          <span>Editor</span>
                         </button>
                         <button
                           onClick={(e) => {
@@ -260,13 +275,14 @@ const Containers: React.FC<ContainersProps> = ({ selectedContext, onContextSelec
                             socket.emit('startContainer', container.Id);
                           }}
                           disabled={container.State === 'running'}
-                          className={`px-3 py-1.5 rounded-md text-sm font-medium transition-colors ${
+                          className={`px-3 py-1.5 rounded-md text-sm font-medium transition-colors flex items-center space-x-1 ${
                             container.State === 'running'
                               ? 'bg-gray-700 text-gray-500 cursor-not-allowed'
                               : 'bg-green-600 text-white hover:bg-green-700'
                           }`}
                         >
-                          ▶️ Start
+                          <PlayIcon className="w-4 h-4" />
+                          <span>Start</span>
                         </button>
                         <button
                           onClick={(e) => {
@@ -274,13 +290,14 @@ const Containers: React.FC<ContainersProps> = ({ selectedContext, onContextSelec
                             socket.emit('stopContainer', container.Id);
                           }}
                           disabled={container.State !== 'running'}
-                          className={`px-3 py-1.5 rounded-md text-sm font-medium transition-colors ${
+                          className={`px-3 py-1.5 rounded-md text-sm font-medium transition-colors flex items-center space-x-1 ${
                             container.State !== 'running'
                               ? 'bg-gray-700 text-gray-500 cursor-not-allowed'
                               : 'bg-yellow-600 text-white hover:bg-yellow-700'
                           }`}
                         >
-                          ⏸️ Stop
+                          <StopIcon className="w-4 h-4" />
+                          <span>Stop</span>
                         </button>
                         <button
                           onClick={(e) => {
@@ -288,13 +305,14 @@ const Containers: React.FC<ContainersProps> = ({ selectedContext, onContextSelec
                             socket.emit('removeContainer', container.Id);
                           }}
                           disabled={container.State === 'running'}
-                          className={`px-3 py-1.5 rounded-md text-sm font-medium transition-colors ${
+                          className={`px-3 py-1.5 rounded-md text-sm font-medium transition-colors flex items-center space-x-1 ${
                             container.State === 'running'
                               ? 'bg-gray-700 text-gray-500 cursor-not-allowed'
                               : 'bg-red-600 text-white hover:bg-red-700'
                           }`}
                         >
-                          🗑️ Remove
+                          <TrashIcon className="w-4 h-4" />
+                          <span>Remove</span>
                         </button>
                       </div>
                     </td>

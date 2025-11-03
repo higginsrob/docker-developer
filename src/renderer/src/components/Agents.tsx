@@ -11,8 +11,6 @@ export interface Agent {
   avatar?: string; // Base64 encoded image or URL
   model: string;
   contextSize: number;
-  enabledTools: string[]; // MCP server names
-  privilegedTools: string[]; // MCP servers that need privileged access
   enabledAttributes?: string[]; // Available attributes like 'Project Path'
   createdAt: Date;
   lastUsed?: Date;
@@ -26,7 +24,7 @@ interface AgentsProps {
 const Agents: React.FC<AgentsProps> = ({ onAgentSelect, selectedAgent }) => {
   const [agents, setAgents] = useState<Agent[]>([]);
   const [models, setModels] = useState<{ id: string; name: string }[]>([]);
-  const [availableTools, setAvailableTools] = useState<string[]>([]);
+  const [, setAvailableTools] = useState<string[]>([]);
   const [isCreating, setIsCreating] = useState(false);
   const [editingAgent, setEditingAgent] = useState<Agent | null>(null);
   const [isSaving, setIsSaving] = useState(false);
@@ -36,8 +34,6 @@ const Agents: React.FC<AgentsProps> = ({ onAgentSelect, selectedAgent }) => {
     jobTitle: '',
     model: '',
     contextSize: 8192,
-    enabledTools: [],
-    privilegedTools: [],
     enabledAttributes: [],
   });
 
@@ -111,8 +107,6 @@ const Agents: React.FC<AgentsProps> = ({ onAgentSelect, selectedAgent }) => {
       jobTitle: '',
       model: models[0]?.id || '',
       contextSize: 8192,
-      enabledTools: [],
-      privilegedTools: [],
       enabledAttributes: ['Agent Name', 'Agent Nickname', 'Agent Job Title', 'User Name'], // Default enabled attributes
     });
     // Request models if not already loaded
@@ -131,8 +125,6 @@ const Agents: React.FC<AgentsProps> = ({ onAgentSelect, selectedAgent }) => {
       avatar: agent.avatar,
       model: agent.model,
       contextSize: agent.contextSize,
-      enabledTools: agent.enabledTools || [],
-      privilegedTools: agent.privilegedTools || [],
       enabledAttributes: agent.enabledAttributes || [],
     });
     // Request models if not already loaded
@@ -163,8 +155,6 @@ const Agents: React.FC<AgentsProps> = ({ onAgentSelect, selectedAgent }) => {
       avatar: formData.avatar,
       model: formData.model,
       contextSize: formData.contextSize || 8192,
-      enabledTools: formData.enabledTools || [],
-      privilegedTools: formData.privilegedTools || [],
       enabledAttributes: formData.enabledAttributes || [],
       createdAt: editingAgent?.createdAt || new Date(),
       lastUsed: editingAgent?.lastUsed,
@@ -207,32 +197,6 @@ const Agents: React.FC<AgentsProps> = ({ onAgentSelect, selectedAgent }) => {
       
       reader.readAsDataURL(file);
     }
-  };
-
-  const toggleTool = (tool: string) => {
-    setFormData(prev => {
-      const enabledTools = prev.enabledTools || [];
-      const isEnabled = enabledTools.includes(tool);
-      return {
-        ...prev,
-        enabledTools: isEnabled
-          ? enabledTools.filter(t => t !== tool)
-          : [...enabledTools, tool],
-      };
-    });
-  };
-
-  const toggleToolPrivileged = (tool: string) => {
-    setFormData(prev => {
-      const privilegedTools = prev.privilegedTools || [];
-      const isPrivileged = privilegedTools.includes(tool);
-      return {
-        ...prev,
-        privilegedTools: isPrivileged
-          ? privilegedTools.filter(t => t !== tool)
-          : [...privilegedTools, tool],
-      };
-    });
   };
 
   const toggleAttribute = (attribute: string) => {
@@ -590,43 +554,6 @@ const Agents: React.FC<AgentsProps> = ({ onAgentSelect, selectedAgent }) => {
                   <span className="text-sm text-gray-700">GitHub Repo</span>
                   <span className="text-xs text-gray-500">(Include GitHub repository information in prompts)</span>
                 </div>
-              </div>
-            </div>
-
-            {/* Tool Selection */}
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-2">
-                Available Tools
-              </label>
-              <div className="border border-gray-300 rounded-lg p-4 max-h-60 overflow-y-auto">
-                {availableTools.length === 0 ? (
-                  <p className="text-gray-500 text-sm">No MCP tools available</p>
-                ) : (
-                  availableTools.map(tool => (
-                    <div key={tool} className="flex items-center justify-between py-2 border-b last:border-b-0">
-                      <div className="flex items-center space-x-3">
-                        <input
-                          type="checkbox"
-                          checked={formData.enabledTools?.includes(tool) || false}
-                          onChange={() => toggleTool(tool)}
-                          className="w-4 h-4 text-blue-600 rounded focus:ring-2 focus:ring-blue-500"
-                        />
-                        <span className="text-sm text-gray-700">{tool}</span>
-                      </div>
-                      {formData.enabledTools?.includes(tool) && (
-                        <label className="flex items-center space-x-2 text-xs text-gray-600">
-                          <input
-                            type="checkbox"
-                            checked={formData.privilegedTools?.includes(tool) || false}
-                            onChange={() => toggleToolPrivileged(tool)}
-                            className="w-3 h-3 text-orange-600 rounded"
-                          />
-                          <span>Privileged</span>
-                        </label>
-                      )}
-                    </div>
-                  ))
-                )}
               </div>
             </div>
 
