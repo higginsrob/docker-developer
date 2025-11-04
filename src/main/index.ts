@@ -431,8 +431,134 @@ app.whenReady().then(async () => {
     privilegedServers: string[];
   } | null = null;
 
+  // Use userData directory for consistent path across dev and production
+  const binPath = path.join(app.getPath('userData'), 'bin');
+  if (fs.existsSync(binPath) && !fs.lstatSync(binPath).isDirectory()) {
+    fs.unlinkSync(binPath);
+  }
+  if (!fs.existsSync(binPath)) {
+    fs.mkdirSync(binPath, { recursive: true });
+  }
+
+  // Copy any executables from the project bin folder to userData bin (for initial setup)
+  const projectBinPath = path.join(process.cwd(), 'bin');
+  
+  // List of system binaries (including our management scripts)
+  const FORBIDDEN_BINARIES = [
+    'ls', 'cat', 'rm', 'cp', 'mv', 'mkdir', 'rmdir', 'pwd', 'echo', 'sh', 'bash', 'zsh',
+    'chmod', 'kill', 'ps', 'date', 'df', 'dd', 'ln', 'test', '[', 'sleep', 'hostname',
+    'sync', 'stty', 'ed', 'expr', 'link', 'unlink', 'pax', 'csh', 'ksh', 'tcsh', 
+    'dash', 'launchctl', 'wait4path', 'realpath', 'find', 'grep', 'sed', 'awk', 
+    'tar', 'gzip', 'gunzip', 'which', 'whoami', 'id', 'env', 'printenv',
+    // Our base AI model executable
+    'ai-model'
+  ];
+
+  // Create the unified ai-model executable
+  const createAiModelExecutable = () => {
+    // List of files to copy from project bin directory
+    const filesToCopy = [
+      'ai-model',
+      'ai-model-api-call.js',
+      'ai-model-build-payload.js',
+      'ai-model-check-tools.js',
+      'ai-model-execute-tools.js',
+      'ai-model-add-user-msg.js'
+    ];
+    
+    for (const fileName of filesToCopy) {
+      const sourcePath = path.join(process.cwd(), 'bin', fileName);
+      const destPath = path.join(binPath, fileName);
+      
+      if (!fs.existsSync(sourcePath)) {
+        console.warn(`Warning: ${fileName} source file not found, skipping...`);
+        continue;
+      }
+      
+      try {
+        fs.copyFileSync(sourcePath, destPath);
+        fs.chmodSync(destPath, '755');
+      } catch (error) {
+        console.error(`Error copying ${fileName}:`, error);
+      }
+    }
+    // console.log('✓ Installed ai-model executable and helper scripts');
+  };
+
+  // Old system scripts - now replaced by ai-model
+  // Kept for reference but will be deprecated
+  const createSystemScripts = () => {
+    // Just create ai-model now
+    createAiModelExecutable();
+    
+    // Clean up old scripts if they exist
+    const oldScripts = [
+      'clear-model-chat-history',
+      'model-history-status',
+      'set-model-context-window-size',
+      'set-model-max-token-size',
+      'set-model-temperature',
+      'set-model-top_p',
+      'set-model-top_k',
+      'set-model-debug-mode'
+    ];
+    
+    oldScripts.forEach(scriptName => {
+      const scriptPath = path.join(binPath, scriptName);
+      if (fs.existsSync(scriptPath)) {
+        try {
+          fs.unlinkSync(scriptPath);
+          console.log(`✓ Removed deprecated script: ${scriptName}`);
+        } catch (e) {
+          console.warn(`Could not remove ${scriptName}:`, e);
+        }
+      }
+    });
+  };
+
+  // Create system scripts at startup (only once)
+  createSystemScripts();
+
   io.on('connection', (socket) => {
     socket.emit('message', 'welcome to the app!');
+
+    // View preferences handlers
+    const viewPreferencesPath = path.join(app.getPath('userData'), 'view-preferences.json');
+
+    socket.on('getViewPreferences', () => {
+      try {
+        if (fs.existsSync(viewPreferencesPath)) {
+          const data = fs.readFileSync(viewPreferencesPath, 'utf8');
+          const preferences = JSON.parse(data);
+          socket.emit('viewPreferences', preferences);
+        } else {
+          // Return default preferences (all table view)
+          socket.emit('viewPreferences', {});
+        }
+      } catch (error) {
+        console.error('Error loading view preferences:', error);
+        socket.emit('viewPreferences', {});
+      }
+    });
+
+    socket.on('saveViewPreference', ({ view, mode }: { view: string; mode: 'table' | 'card' }) => {
+      try {
+        let preferences: Record<string, 'table' | 'card'> = {};
+        
+        if (fs.existsSync(viewPreferencesPath)) {
+          const data = fs.readFileSync(viewPreferencesPath, 'utf8');
+          preferences = JSON.parse(data);
+        }
+        
+        preferences[view] = mode;
+        fs.writeFileSync(viewPreferencesPath, JSON.stringify(preferences, null, 2));
+        
+        // Emit success
+        socket.emit('viewPreferenceSaved', { view, mode });
+      } catch (error) {
+        console.error('Error saving view preference:', error);
+      }
+    });
 
     // Handle terminal history request
     socket.on('getTerminalHistory', () => {
@@ -905,6 +1031,125 @@ app.whenReady().then(async () => {
       } catch (error) {
         console.error('Error saving editor settings:', error);
         socket.emit('editorSettingsError', { error: 'Failed to save settings' });
+      }
+    });
+
+    // User settings functionality
+    const userSettingsPath = path.join(app.getPath('userData'), 'user-settings.json');
+
+    // Helper to get git config
+    const getGitConfig = async () => {
+      try {
+        const git = simpleGit();
+        const [name, email] = await Promise.all([
+          git.getConfig('user.name').catch(() => ({ value: '' })),
+          git.getConfig('user.email').catch(() => ({ value: '' }))
+        ]);
+        return {
+          gitName: name.value || '',
+          gitEmail: email.value || ''
+        };
+      } catch (error) {
+        console.error('Error getting git config:', error);
+        return { gitName: '', gitEmail: '' };
+      }
+    };
+
+    socket.on('getUserSettings', async () => {
+      try {
+        // Get git config
+        const gitConfig = await getGitConfig();
+        
+        // Load existing settings
+        let settings: any = {
+          allowUseGitName: true,
+          allowUseGitEmail: true,
+          nickname: '',
+          language: '',
+          age: '',
+          gender: '',
+          orientation: '',
+          race: '',
+          ethnicity: '',
+          jobTitle: '',
+          employer: '',
+          incomeLevel: '',
+          educationLevel: '',
+          politicalIdeology: '',
+          maritalStatus: '',
+          numberOfChildren: '',
+          housing: '',
+          headOfHousehold: '',
+          religion: '',
+          interests: '',
+          country: '',
+          state: '',
+          zipcode: '',
+        };
+
+        if (fs.existsSync(userSettingsPath)) {
+          const data = fs.readFileSync(userSettingsPath, 'utf8');
+          settings = { ...settings, ...JSON.parse(data) };
+        }
+
+        // Add git info to response
+        socket.emit('userSettings', {
+          ...settings,
+          gitName: gitConfig.gitName,
+          gitEmail: gitConfig.gitEmail
+        });
+      } catch (error) {
+        console.error('Error reading user settings:', error);
+        socket.emit('userSettings', {
+          allowUseGitName: true,
+          allowUseGitEmail: true,
+          nickname: '',
+          language: '',
+          age: '',
+          gender: '',
+          orientation: '',
+          race: '',
+          ethnicity: '',
+          jobTitle: '',
+          employer: '',
+          incomeLevel: '',
+          educationLevel: '',
+          politicalIdeology: '',
+          maritalStatus: '',
+          numberOfChildren: '',
+          housing: '',
+          headOfHousehold: '',
+          religion: '',
+          interests: '',
+          country: '',
+          state: '',
+          zipcode: '',
+          gitName: '',
+          gitEmail: ''
+        });
+      }
+    });
+
+    socket.on('saveUserSettings', async (settings: any) => {
+      try {
+        // Don't save git info (those are system settings)
+        const { gitName, gitEmail, ...settingsToSave } = settings;
+        
+        // Get latest git config to include in the saved file
+        const gitConfig = await getGitConfig();
+        
+        // Save settings with git info for ai-model to use
+        const fullSettings = {
+          ...settingsToSave,
+          gitName: gitConfig.gitName,
+          gitEmail: gitConfig.gitEmail
+        };
+        
+        fs.writeFileSync(userSettingsPath, JSON.stringify(fullSettings, null, 2), 'utf8');
+        socket.emit('userSettingsSaved', settings);
+      } catch (error) {
+        console.error('Error saving user settings:', error);
+        socket.emit('userSettingsError', { error: 'Failed to save settings' });
       }
     });
 
@@ -1424,27 +1669,6 @@ app.whenReady().then(async () => {
       }
     });
 
-    // Use userData directory for consistent path across dev and production
-    const binPath = path.join(app.getPath('userData'), 'bin');
-    if (fs.existsSync(binPath) && !fs.lstatSync(binPath).isDirectory()) {
-      fs.unlinkSync(binPath);
-    }
-    if (!fs.existsSync(binPath)) {
-      fs.mkdirSync(binPath, { recursive: true });
-    }
-
-    // Copy any executables from the project bin folder to userData bin (for initial setup)
-    const projectBinPath = path.join(process.cwd(), 'bin');
-    
-    // List of system binaries
-    const FORBIDDEN_BINARIES = [
-      'ls', 'cat', 'rm', 'cp', 'mv', 'mkdir', 'rmdir', 'pwd', 'echo', 'sh', 'bash', 'zsh',
-      'chmod', 'kill', 'ps', 'date', 'df', 'dd', 'ln', 'test', '[', 'sleep', 'hostname',
-      'sync', 'stty', 'ed', 'expr', 'link', 'unlink', 'pax', 'csh', 'ksh', 'tcsh', 
-      'dash', 'launchctl', 'wait4path', 'realpath', 'find', 'grep', 'sed', 'awk', 
-      'tar', 'gzip', 'gunzip', 'which', 'whoami', 'id', 'env', 'printenv'
-    ];
-
     socket.on('checkPath', () => {
       const pathVar = process.env.PATH || '';
       const isBinInPath = pathVar.includes(binPath);
@@ -1458,11 +1682,11 @@ app.whenReady().then(async () => {
         const executables = allFiles.filter(file => {
           // Skip forbidden binaries
           if (FORBIDDEN_BINARIES.includes(file)) {
-            console.warn(`[SECURITY] Filtering out forbidden binary: ${file}`);
+            // console.warn(`[SECURITY] Filtering out forbidden binary: ${file}`);
             return false;
           }
           
-          // Skip hidden files and directories
+          // Skip hidden files and directories (including config files)
           if (file.startsWith('.')) {
             return false;
           }
@@ -1474,10 +1698,16 @@ app.whenReady().then(async () => {
               return false;
             }
             
-            // Verify it's an AI model script (docker model run)
+            // Check for config file (new format)
+            const configPath = path.join(binPath, `.${file}.config.json`);
+            if (fs.existsSync(configPath)) {
+              return true;
+            }
+            
+            // Verify it's an AI model script (docker model run - old format)
             const content = fs.readFileSync(filePath, 'utf8');
             if (!content.includes('docker model run')) {
-              console.warn(`[SECURITY] Skipping non-AI-model script: ${file}`);
+              // console.warn(`[SECURITY] Skipping non-AI-model script: ${file}`);
               return false;
             }
             
@@ -1489,7 +1719,7 @@ app.whenReady().then(async () => {
           }
         });
         
-        console.log(`✓ Found ${executables.length} AI model executable(s)`);
+        // console.log(`✓ Found ${executables.length} AI model executable(s)`);
         socket.emit('executables', executables);
       } catch (error) {
         console.error('Error reading executables:', error);
@@ -1498,7 +1728,21 @@ app.whenReady().then(async () => {
 
     socket.on('createExecutable', (data: any) => {
       try {
-        const { name, image } = data;
+        const { 
+          name, 
+          image, 
+          context_size = 8192,
+          max_tokens = 2048,
+          temperature = 0.7,
+          top_p = 0.9,
+          top_k = 40,
+          mcp_servers = '',
+          tools = '',
+          tool_choice = 'auto',
+          tool_mode = 'prompt',
+          response_format = 'text',
+          debug_mode = false
+        } = data;
         
         // Security check: prevent overriding system binaries
         if (FORBIDDEN_BINARIES.includes(name)) {
@@ -1521,8 +1765,78 @@ app.whenReady().then(async () => {
           return;
         }
         
-        // Only create AI model executables (docker model run)
-        const script = `#!/bin/sh\ndocker model run ${image} "$@"\n`;
+        // Store configuration in JSON file
+        const configPath = path.join(binPath, `.${name}.config.json`);
+        const config = {
+          name,
+          image,
+          context_size,
+          max_tokens,
+          temperature,
+          top_p,
+          top_k,
+          mcp_servers,
+          tools,
+          tool_choice,
+          tool_mode,
+          response_format,
+          debug_mode
+        };
+        fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
+        
+        // Create simple wrapper script that calls ai-model
+        const script = `#!/bin/bash
+# AI Model Executable: ${name}
+# Model: ${image}
+# Generated by Docker Developer
+# This is a wrapper that calls the base ai-model executable
+
+# Configuration
+CONFIG_FILE="${configPath}"
+MODEL_NAME="${name}"
+
+# Read configuration
+read_config() {
+  node -e "const fs=require('fs');const c=JSON.parse(fs.readFileSync('$CONFIG_FILE','utf8'));const v=c.\$1;console.log(v!==undefined?v:'\$2');"
+}
+
+IMAGE=$(read_config image)
+CTX_SIZE=$(read_config context_size 8192)
+MAX_TOKENS=$(read_config max_tokens 2048)
+TEMPERATURE=$(read_config temperature 0.7)
+TOP_P=$(read_config top_p 0.9)
+TOP_K=$(read_config top_k 40)
+MCP_SERVERS=$(read_config mcp_servers "")
+TOOLS=$(read_config tools "")
+TOOL_CHOICE=$(read_config tool_choice "auto")
+TOOL_MODE=$(read_config tool_mode "prompt")
+DEBUG=$(read_config debug_mode false)
+
+# Build options for ai-model command
+OPTIONS="--ctx-size \$CTX_SIZE"
+OPTIONS="\$OPTIONS --max-tokens \$MAX_TOKENS"
+OPTIONS="\$OPTIONS --temperature \$TEMPERATURE"
+OPTIONS="\$OPTIONS --top_p \$TOP_P"
+OPTIONS="\$OPTIONS --top_k \$TOP_K"
+if [ -n "\$MCP_SERVERS" ]; then
+  OPTIONS="\$OPTIONS --mcp-servers \$MCP_SERVERS"
+fi
+if [ -n "\$TOOLS" ]; then
+  OPTIONS="\$OPTIONS --tools \$TOOLS"
+fi
+OPTIONS="\$OPTIONS --tool-choice \$TOOL_CHOICE"
+OPTIONS="\$OPTIONS --tool-mode \$TOOL_MODE"
+OPTIONS="\$OPTIONS --debug \$DEBUG"
+
+# Check if we have arguments (prompt mode) or no arguments (interactive mode)
+if [ $# -eq 0 ]; then
+  # No arguments - run in interactive mode
+  exec ai-model run \$OPTIONS "\$IMAGE"
+else
+  # Arguments provided - run prompt mode
+  exec ai-model prompt \$OPTIONS "\$IMAGE" "\$@"
+fi
+`;
         
         const filePath = path.join(binPath, name);
         fs.writeFileSync(filePath, script);
@@ -1541,11 +1855,134 @@ app.whenReady().then(async () => {
     socket.on('deleteExecutable', (name: string) => {
       try {
         fs.unlinkSync(path.join(binPath, name));
+        
+        // Also delete the config file if it exists
+        const configPath = path.join(binPath, `.${name}.config.json`);
+        if (fs.existsSync(configPath)) {
+          fs.unlinkSync(configPath);
+        }
+        
+        // Delete history file if it exists
+        const historyFile = path.join(app.getPath('home'), '.docker-developer', 'history', `${name}.json`);
+        if (fs.existsSync(historyFile)) {
+          fs.unlinkSync(historyFile);
+        }
+        
         const executables = fs.readdirSync(binPath);
         io.emit('executables', executables);
       } catch (error) {
         console.error('Error deleting executable:', error);
+        socket.emit('error', 'Failed to delete executable');
       }
+    });
+
+    socket.on('getExecutable', (name: string) => {
+      try {
+        const configPath = path.join(binPath, `.${name}.config.json`);
+        if (fs.existsSync(configPath)) {
+          const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+          socket.emit('executable', config);
+        }
+      } catch (error) {
+        console.error('Error reading executable:', error);
+      }
+    });
+
+    // Get list of available MCP servers with detailed information
+    socket.on('getMCPServers', () => {
+      exec('docker mcp server ls --json', (error, stdout, stderr) => {
+        if (error) {
+          console.error('Error getting MCP servers:', error);
+          socket.emit('mcpServers', []);
+          return;
+        }
+        try {
+          const serverNames = JSON.parse(stdout);
+          if (!Array.isArray(serverNames) || serverNames.length === 0) {
+            socket.emit('mcpServers', []);
+            return;
+          }
+          
+          // Get detailed info for each server using inspect
+          const serverPromises = serverNames.map((name: string) => {
+            return new Promise((resolve) => {
+              exec(`docker mcp server inspect ${name}`, (err, inspectOut) => {
+                if (err) {
+                  console.error(`Error inspecting server ${name}:`, err);
+                  resolve({ name, tools: [], enabled: true });
+                  return;
+                }
+                try {
+                  const details = JSON.parse(inspectOut);
+                  resolve({
+                    name,
+                    tools: details.tools || [],
+                    toolCount: (details.tools || []).length,
+                    readme: details.readme || '',
+                    enabled: true // Servers returned by ls are enabled
+                  });
+                } catch (parseErr) {
+                  console.error(`Error parsing inspect for ${name}:`, parseErr);
+                  resolve({ name, tools: [], enabled: true });
+                }
+              });
+            });
+          });
+          
+          Promise.all(serverPromises).then((servers) => {
+            socket.emit('mcpServers', servers);
+          });
+        } catch (err) {
+          console.error('Error parsing MCP servers:', err);
+          socket.emit('mcpServers', []);
+        }
+      });
+    });
+
+    // Remove/disable MCP server
+    socket.on('removeMCPServer', (serverName: string) => {
+      exec(`docker mcp server disable ${serverName}`, (error, stdout, stderr) => {
+        if (error) {
+          console.error('Error removing MCP server:', error);
+          socket.emit('mcpError', `Failed to remove server: ${error.message}`);
+          return;
+        }
+        console.log(`Server ${serverName} disabled successfully`);
+        // Refresh the server list
+        socket.emit('getMCPServers');
+      });
+    });
+
+    // Get list of available MCP tools based on selected servers
+    socket.on('getMCPTools', (servers: string[]) => {
+      if (!servers || servers.length === 0) {
+        socket.emit('mcpTools', []);
+        return;
+      }
+      
+      // docker mcp tools ls doesn't support filtering by server
+      // It lists all tools from all enabled servers in the gateway
+      // So we just get all tools and let the UI handle the selection
+      exec('docker mcp tools ls --format json 2>/dev/null', (error, stdout, stderr) => {
+        if (error) {
+          console.error('Error getting MCP tools:', error);
+          socket.emit('mcpTools', []);
+          return;
+        }
+        try {
+          const tools = JSON.parse(stdout);
+          // Extract tool names and descriptions for the UI
+          const toolList = tools.map((tool: any) => ({
+            name: tool.name,
+            description: tool.description || '',
+            server: tool.server || '' // Include server info if available
+          }));
+          socket.emit('mcpTools', toolList);
+        } catch (err) {
+          console.error('Error parsing MCP tools:', err);
+          socket.emit('mcpTools', []);
+        }
+      });
     });
 
     socket.on('getExecutable', (name: string) => {
@@ -1556,11 +1993,21 @@ app.whenReady().then(async () => {
           return;
         }
         
+        // Try to read config file first (new format)
+        const configPath = path.join(binPath, `.${name}.config.json`);
+        if (fs.existsSync(configPath)) {
+          const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+          // console.log(`✓ Loaded executable config: ${name} -> ${config.image}`);
+          socket.emit('executable', config);
+          return;
+        }
+        
+        // Fallback to old format (docker model run)
         const script = fs.readFileSync(path.join(binPath, name), 'utf8');
         
         // Validate it's a Docker model script
         if (!script.includes('docker model run')) {
-          console.warn(`[SECURITY] Skipping non-AI-model file: ${name}`);
+          // console.warn(`[SECURITY] Skipping non-AI-model file: ${name}`);
           return;
         }
         
@@ -1576,6 +2023,16 @@ app.whenReady().then(async () => {
         const data = {
           name,
           image: modelImage,
+          context_size: 8192,
+          max_tokens: 2048,
+          temperature: 0.7,
+          top_p: 0.9,
+          top_k: 40,
+          tools: '',
+          tool_choice: 'auto',
+          tool_mode: 'prompt',
+          response_format: 'text',
+          debug_mode: true,
         };
         
         console.log(`✓ Loaded executable: ${name} -> ${modelImage}`);
@@ -4106,7 +4563,7 @@ exec "$@"
         console.log(`Emitting ${toolNames.length} MCP tools:`, toolNames.join(', '));
         io.emit('mcpToolsUpdated', toolNames);
       } else {
-        console.log('No MCP gateway connected, emitting empty tools list');
+        // console.log('No MCP gateway connected, emitting empty tools list');
         io.emit('mcpToolsUpdated', []);
       }
     };
@@ -4128,7 +4585,7 @@ exec "$@"
           io.emit('mcpToolsUpdated', []);
         }
       } else {
-        console.log('Cannot refresh tools: no MCP gateway connected');
+        // console.log('Cannot refresh tools: no MCP gateway connected');
         io.emit('mcpToolsUpdated', []);
       }
     });

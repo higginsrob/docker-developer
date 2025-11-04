@@ -18,15 +18,24 @@ interface UserSettings {
   age: string;
   gender: string;
   orientation: string;
+  race: string;
+  ethnicity: string;
   jobTitle: string;
   employer: string;
+  incomeLevel: string;
   educationLevel: string;
   politicalIdeology: string;
+  maritalStatus: string;
+  numberOfChildren: string;
+  housing: string;
+  headOfHousehold: string;
   religion: string;
   interests: string;
   country: string;
   state: string;
   zipcode: string;
+  gitName?: string;
+  gitEmail?: string;
 }
 
 interface RAGConfig {
@@ -43,37 +52,33 @@ interface RAGStats {
   config: RAGConfig;
 }
 
-const SETTINGS_KEY = 'userSettings';
-
 const Settings: React.FC<{ userProfile: UserProfile; onRefresh?: () => void }> = ({ userProfile, onRefresh }) => {
-  const [settings, setSettings] = useState<UserSettings>(() => {
-    // Load settings from localStorage
-    try {
-      const saved = localStorage.getItem(SETTINGS_KEY);
-      if (saved) {
-        return JSON.parse(saved);
-      }
-    } catch (error) {
-      console.error('Error loading settings:', error);
-    }
-    return {
-      allowUseGitName: true,
-      allowUseGitEmail: true,
-      nickname: '',
-      language: '',
-      age: '',
-      gender: '',
-      orientation: '',
-      jobTitle: '',
-      employer: '',
-      educationLevel: '',
-      politicalIdeology: '',
-      religion: '',
-      interests: '',
-      country: '',
-      state: '',
-      zipcode: '',
-    };
+  const [settings, setSettings] = useState<UserSettings>({
+    allowUseGitName: true,
+    allowUseGitEmail: true,
+    nickname: '',
+    language: '',
+    age: '',
+    gender: '',
+    orientation: '',
+    race: '',
+    ethnicity: '',
+    jobTitle: '',
+    employer: '',
+    incomeLevel: '',
+    educationLevel: '',
+    politicalIdeology: '',
+    maritalStatus: '',
+    numberOfChildren: '',
+    housing: '',
+    headOfHousehold: '',
+    religion: '',
+    interests: '',
+    country: '',
+    state: '',
+    zipcode: '',
+    gitName: '',
+    gitEmail: '',
   });
 
   const [ragConfig, setRagConfig] = useState<RAGConfig>({
@@ -85,14 +90,23 @@ const Settings: React.FC<{ userProfile: UserProfile; onRefresh?: () => void }> =
 
   const [ragStats, setRagStats] = useState<RAGStats | null>(null);
 
-  // Save settings to localStorage whenever they change
+  // Load user settings on mount
   useEffect(() => {
-    try {
-      localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
-    } catch (error) {
-      console.error('Error saving settings:', error);
-    }
-  }, [settings]);
+    socket.emit('getUserSettings');
+    
+    socket.on('userSettings', (loadedSettings: UserSettings) => {
+      setSettings(loadedSettings);
+    });
+
+    socket.on('userSettingsSaved', () => {
+      // Settings saved successfully
+    });
+
+    return () => {
+      socket.off('userSettings');
+      socket.off('userSettingsSaved');
+    };
+  }, []);
 
   // Load RAG config and stats on mount
   useEffect(() => {
@@ -130,10 +144,13 @@ const Settings: React.FC<{ userProfile: UserProfile; onRefresh?: () => void }> =
   };
 
   const handleSettingChange = (field: keyof UserSettings, value: boolean | string) => {
-    setSettings(prev => ({
-      ...prev,
+    const newSettings = {
+      ...settings,
       [field]: value,
-    }));
+    };
+    setSettings(newSettings);
+    // Save to file immediately
+    socket.emit('saveUserSettings', newSettings);
   };
 
   return (
@@ -162,7 +179,7 @@ const Settings: React.FC<{ userProfile: UserProfile; onRefresh?: () => void }> =
                 Git User Name
               </label>
               <p className="text-gray-900 bg-white px-4 py-2 rounded-lg border border-gray-300">
-                {userProfile.name || 'Not configured'}
+                {settings.gitName || userProfile.name || 'Not configured'}
               </p>
             </div>
             <div>
@@ -170,7 +187,7 @@ const Settings: React.FC<{ userProfile: UserProfile; onRefresh?: () => void }> =
                 Git Email Address
               </label>
               <p className="text-gray-900 bg-white px-4 py-2 rounded-lg border border-gray-300">
-                {userProfile.email || 'Not configured'}
+                {settings.gitEmail || userProfile.email || 'Not configured'}
               </p>
             </div>
           </div>
@@ -305,6 +322,42 @@ const Settings: React.FC<{ userProfile: UserProfile; onRefresh?: () => void }> =
               </div>
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-2">
+                  Race
+                </label>
+                <input
+                  type="text"
+                  list="race-options"
+                  value={settings.race}
+                  onChange={(e) => handleSettingChange('race', e.target.value)}
+                  className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                  placeholder="Enter your race"
+                />
+                <datalist id="race-options">
+                  <option value="American Indian or Alaska Native">American Indian or Alaska Native</option>
+                  <option value="Asian">Asian</option>
+                  <option value="Black or African American">Black or African American</option>
+                  <option value="Native Hawaiian or Other Pacific Islander">Native Hawaiian or Other Pacific Islander</option>
+                  <option value="White">White</option>
+                  <option value="Two or More Races">Two or More Races</option>
+                  <option value="Prefer not to say">Prefer not to say</option>
+                </datalist>
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">
+                  Ethnicity
+                </label>
+                <select
+                  value={settings.ethnicity}
+                  onChange={(e) => handleSettingChange('ethnicity', e.target.value)}
+                  className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                >
+                  <option value="">Prefer not to say</option>
+                  <option value="Hispanic or Latino">Hispanic or Latino</option>
+                  <option value="Not Hispanic or Latino">Not Hispanic or Latino</option>
+                </select>
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">
                   Job Title
                 </label>
                 <input
@@ -326,6 +379,27 @@ const Settings: React.FC<{ userProfile: UserProfile; onRefresh?: () => void }> =
                   className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
                   placeholder="e.g., Acme Corporation"
                 />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">
+                  Income Level
+                </label>
+                <select
+                  value={settings.incomeLevel}
+                  onChange={(e) => handleSettingChange('incomeLevel', e.target.value)}
+                  className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                >
+                  <option value="">Prefer not to say</option>
+                  <option value="Under $25,000">Under $25,000</option>
+                  <option value="$25,000 - $49,999">$25,000 - $49,999</option>
+                  <option value="$50,000 - $74,999">$50,000 - $74,999</option>
+                  <option value="$75,000 - $99,999">$75,000 - $99,999</option>
+                  <option value="$100,000 - $149,999">$100,000 - $149,999</option>
+                  <option value="$150,000 - $199,999">$150,000 - $199,999</option>
+                  <option value="$200,000 - $299,999">$200,000 - $299,999</option>
+                  <option value="$300,000 - $499,999">$300,000 - $499,999</option>
+                  <option value="$500,000+">$500,000+</option>
+                </select>
               </div>
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-2">
@@ -368,6 +442,72 @@ const Settings: React.FC<{ userProfile: UserProfile; onRefresh?: () => void }> =
               </div>
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-2">
+                  Marital Status
+                </label>
+                <select
+                  value={settings.maritalStatus}
+                  onChange={(e) => handleSettingChange('maritalStatus', e.target.value)}
+                  className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                >
+                  <option value="">Prefer not to say</option>
+                  <option value="Single">Single</option>
+                  <option value="Married">Married</option>
+                  <option value="Domestic Partnership">Domestic Partnership</option>
+                  <option value="Divorced">Divorced</option>
+                  <option value="Separated">Separated</option>
+                  <option value="Widowed">Widowed</option>
+                </select>
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">
+                  Number of Children
+                </label>
+                <select
+                  value={settings.numberOfChildren}
+                  onChange={(e) => handleSettingChange('numberOfChildren', e.target.value)}
+                  className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                >
+                  <option value="">Prefer not to say</option>
+                  <option value="0">0</option>
+                  <option value="1">1</option>
+                  <option value="2">2</option>
+                  <option value="3">3</option>
+                  <option value="4">4</option>
+                  <option value="5+">5+</option>
+                </select>
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">
+                  Housing
+                </label>
+                <select
+                  value={settings.housing}
+                  onChange={(e) => handleSettingChange('housing', e.target.value)}
+                  className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                >
+                  <option value="">Prefer not to say</option>
+                  <option value="Own">Own</option>
+                  <option value="Rent">Rent</option>
+                  <option value="Living with family">Living with family</option>
+                  <option value="Other">Other</option>
+                </select>
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">
+                  Head of Household
+                </label>
+                <select
+                  value={settings.headOfHousehold}
+                  onChange={(e) => handleSettingChange('headOfHousehold', e.target.value)}
+                  className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                >
+                  <option value="">Prefer not to say</option>
+                  <option value="Yes">Yes</option>
+                  <option value="No">No</option>
+                </select>
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">
                   Religion
                 </label>
                 <input
@@ -379,6 +519,7 @@ const Settings: React.FC<{ userProfile: UserProfile; onRefresh?: () => void }> =
                   placeholder="Enter your religion"
                 />
                 <datalist id="religion-options">
+                  <option value="Spiritual Not Religious">Spiritual, Not Religious</option>
                   <option value="Christianity">Christianity</option>
                   <option value="Islam">Islam</option>
                   <option value="Hinduism">Hinduism</option>

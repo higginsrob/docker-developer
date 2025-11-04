@@ -51,7 +51,6 @@ const CircleProgress: React.FC<{ percentage: number; size?: number }> = React.me
 const socket = io('http://localhost:3002');
 const CHAT_PANEL_WIDTH_KEY = 'chatPanelWidth';
 const CHAT_PANEL_EXPANDED_KEY = 'chatPanelExpanded';
-const USER_SETTINGS_KEY = 'userSettings';
 const SELECTED_TOOLS_KEY = 'selectedTools';
 
 interface UserSettings {
@@ -62,46 +61,25 @@ interface UserSettings {
   age: string;
   gender: string;
   orientation: string;
+  race: string;
+  ethnicity: string;
   jobTitle: string;
   employer: string;
+  incomeLevel: string;
   educationLevel: string;
   politicalIdeology: string;
+  maritalStatus: string;
+  numberOfChildren: string;
+  housing: string;
+  headOfHousehold: string;
   religion: string;
   interests: string;
   country: string;
   state: string;
   zipcode: string;
+  gitName?: string;
+  gitEmail?: string;
 }
-
-// Load user settings from localStorage
-const loadUserSettings = (): UserSettings => {
-  try {
-    const saved = localStorage.getItem(USER_SETTINGS_KEY);
-    if (saved) {
-      return JSON.parse(saved);
-    }
-  } catch (error) {
-    console.error('Error loading user settings:', error);
-  }
-  return {
-    allowUseGitName: true,
-    allowUseGitEmail: true,
-    nickname: '',
-    language: '',
-    age: '',
-    gender: '',
-    orientation: '',
-    jobTitle: '',
-    employer: '',
-    educationLevel: '',
-    politicalIdeology: '',
-    religion: '',
-    interests: '',
-    country: '',
-    state: '',
-    zipcode: '',
-  };
-};
 
 // Load selected tools from localStorage for a specific agent
 const loadSelectedTools = (agentId: string | null | undefined): string[] => {
@@ -530,7 +508,33 @@ const ChatPanel = forwardRef<ChatPanelRef, ChatPanelProps>(({ isOpen, onClose, s
   const [currentSessionId, setCurrentSessionId] = useState<string | null>(null);
   const [isWaitingForResponse, setIsWaitingForResponse] = useState(false);
   const [currentRequestId, setCurrentRequestId] = useState<string | null>(null);
-  const [userSettings, setUserSettings] = useState<UserSettings>(loadUserSettings());
+  const [userSettings, setUserSettings] = useState<UserSettings>({
+    allowUseGitName: true,
+    allowUseGitEmail: true,
+    nickname: '',
+    language: '',
+    age: '',
+    gender: '',
+    orientation: '',
+    race: '',
+    ethnicity: '',
+    jobTitle: '',
+    employer: '',
+    incomeLevel: '',
+    educationLevel: '',
+    politicalIdeology: '',
+    maritalStatus: '',
+    numberOfChildren: '',
+    housing: '',
+    headOfHousehold: '',
+    religion: '',
+    interests: '',
+    country: '',
+    state: '',
+    zipcode: '',
+    gitName: '',
+    gitEmail: '',
+  });
   const pendingRequestsRef = useRef<Set<string>>(new Set()); // Track all pending request IDs across all agents
   const [hasPendingRequests, setHasPendingRequests] = useState(false); // State to trigger re-renders
   const [ragIndexingStatus, setRagIndexingStatus] = useState<string | null>(null); // RAG indexing status
@@ -929,8 +933,12 @@ const ChatPanel = forwardRef<ChatPanelRef, ChatPanelProps>(({ isOpen, onClose, s
     if (isOpen) {
       socket.emit('getChatModels');
       // Reload user settings when chat opens
-      setUserSettings(loadUserSettings());
+      socket.emit('getUserSettings');
     }
+
+    socket.on('userSettings', (settings: UserSettings) => {
+      setUserSettings(settings);
+    });
 
     socket.on('chatModels', (modelsList: Model[]) => {
       // Models loaded but not used - agent provides the model
@@ -1939,6 +1947,7 @@ const ChatPanel = forwardRef<ChatPanelRef, ChatPanelProps>(({ isOpen, onClose, s
     });
 
     return () => {
+      socket.off('userSettings');
       socket.off('chatModels');
       socket.off('ragIndexingStatus');
       socket.off('chatResponseChunk');

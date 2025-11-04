@@ -895,7 +895,7 @@ function App() {
             }}
           >
             {/* Content Area */}
-            <div className={`${currentView === 'containers' || currentView === 'editor' ? 'p-0 h-full' : 'p-8'} flex-1 overflow-auto`}>
+            <div className={`${currentView === 'editor' ? 'p-0 h-full' : 'p-8'} flex-1 overflow-auto`}>
           {currentView === 'projects' && (
             <div className="space-y-6">
               <Projects 

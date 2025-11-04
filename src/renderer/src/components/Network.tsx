@@ -1,5 +1,6 @@
 import React, { useEffect, useState, useMemo } from 'react';
 import io from 'socket.io-client';
+import ViewToggle from './ViewToggle';
 import {
   MagnifyingGlassIcon,
   GlobeAltIcon,
@@ -21,7 +22,27 @@ const Network: React.FC = () => {
   const [filter, setFilter] = useState('');
   const [sortConfig, setSortConfig] = useState<{ key: keyof NetworkInfo; direction: 'ascending' | 'descending' } | null>(null);
   const [currentPage, setCurrentPage] = useState(1);
+  const [viewMode, setViewMode] = useState<'table' | 'card'>('table');
   const itemsPerPage = 25;
+
+  // Load view preferences
+  useEffect(() => {
+    socket.emit('getViewPreferences');
+    socket.on('viewPreferences', (preferences: Record<string, 'table' | 'card'>) => {
+      if (preferences.networks) {
+        setViewMode(preferences.networks);
+      }
+    });
+    return () => {
+      socket.off('viewPreferences');
+    };
+  }, []);
+
+  // Handle view mode change
+  const handleViewModeChange = (mode: 'table' | 'card') => {
+    setViewMode(mode);
+    socket.emit('saveViewPreference', { view: 'networks', mode });
+  };
 
   useEffect(() => {
     socket.emit('getNetworks');
@@ -96,13 +117,16 @@ const Network: React.FC = () => {
               {networks.length} network{networks.length !== 1 ? 's' : ''} found
             </p>
           </div>
-          <button 
-            onClick={() => setShowInput(!showInput)}
-            className="flex items-center space-x-2 bg-docker-blue hover:bg-blue-600 text-white font-medium px-5 py-2.5 rounded-lg shadow-md hover:shadow-lg transition-all duration-200"
-          >
-            <span className="text-lg">+</span>
-            <span>Create Network</span>
-          </button>
+          <div className="flex items-center space-x-3">
+            <ViewToggle viewMode={viewMode} onViewModeChange={handleViewModeChange} />
+            <button 
+              onClick={() => setShowInput(!showInput)}
+              className="flex items-center space-x-2 bg-docker-blue hover:bg-blue-600 text-white font-medium px-5 py-2.5 rounded-lg shadow-md hover:shadow-lg transition-all duration-200"
+            >
+              <span className="text-lg">+</span>
+              <span>Create Network</span>
+            </button>
+          </div>
         </div>
 
         {/* Create Network Input */}
@@ -161,14 +185,95 @@ const Network: React.FC = () => {
         </div>
       </div>
 
-      {/* Networks Table */}
+      {/* Networks View */}
       {networks.length === 0 ? (
         <div className="bg-gray-800 rounded-xl shadow-sm border border-gray-700 p-12 text-center">
           <GlobeAltIcon className="w-16 h-16 mx-auto mb-4 text-gray-500" />
           <h3 className="text-xl font-semibold text-gray-200 mb-2">No Networks</h3>
           <p className="text-gray-400">No Docker networks found</p>
         </div>
+      ) : viewMode === 'card' ? (
+        /* Card View */
+        <>
+          <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-6">
+            {paginatedNetworks.map((network) => (
+              <div
+                key={network.Id}
+                className="bg-gray-800 rounded-xl shadow-sm border border-gray-700 p-6 hover:shadow-md transition-all duration-200"
+              >
+                <div className="flex items-start justify-between mb-4">
+                  <div className="flex items-center space-x-3">
+                    <GlobeAltIcon className="w-8 h-8 text-blue-400" />
+                    <div>
+                      <h4 className="text-lg font-semibold text-gray-100">{network.Name}</h4>
+                      <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-blue-900 text-blue-200">
+                        {network.Driver}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="space-y-3 mb-4">
+                  <div>
+                    <span className="text-xs text-gray-400 font-medium">Scope</span>
+                    <div className="text-sm text-gray-200 mt-1">{network.Scope}</div>
+                  </div>
+                  
+                  <div>
+                    <span className="text-xs text-gray-400 font-medium">Network ID</span>
+                    <div className="text-xs font-mono text-gray-300 bg-gray-700 px-2 py-1 rounded mt-1 break-all">
+                      {network.Id.substring(0, 12)}
+                    </div>
+                  </div>
+                </div>
+
+                <div className="pt-4 border-t border-gray-700">
+                  <button
+                    onClick={() => handleDelete(network.Id)}
+                    className="w-full py-2 px-4 bg-red-600 text-white hover:bg-red-700 rounded-lg text-sm font-medium transition-colors flex items-center justify-center space-x-2"
+                  >
+                    <TrashIcon className="w-4 h-4" />
+                    <span>Delete</span>
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+
+          {/* Pagination for Card View */}
+          {sortedAndFilteredNetworks.length > itemsPerPage && (
+            <div className="bg-gray-800 px-6 py-4 rounded-lg border border-gray-700 flex items-center justify-between mt-6">
+              <div className="text-sm text-gray-300">
+                Showing {((currentPage - 1) * itemsPerPage) + 1} to {Math.min(currentPage * itemsPerPage, sortedAndFilteredNetworks.length)} of {sortedAndFilteredNetworks.length} networks
+              </div>
+              <div className="flex items-center space-x-2">
+                <button
+                  onClick={() => setCurrentPage(p => Math.max(1, p - 1))}
+                  disabled={currentPage === 1}
+                  className={`px-4 py-2 rounded-lg font-medium transition-colors ${
+                    currentPage === 1 ? 'bg-gray-700 text-gray-500 cursor-not-allowed' : 'bg-gray-700 text-gray-200 hover:bg-gray-600 border border-gray-600'
+                  }`}
+                >
+                  ← Previous
+                </button>
+                <span className="px-4 py-2 text-sm font-medium text-gray-200">
+                  Page {currentPage} of {Math.ceil(sortedAndFilteredNetworks.length / itemsPerPage)}
+                </span>
+                <button
+                  onClick={() => setCurrentPage(p => p + 1)}
+                  disabled={currentPage * itemsPerPage >= sortedAndFilteredNetworks.length}
+                  className={`px-4 py-2 rounded-lg font-medium transition-colors ${
+                    currentPage * itemsPerPage >= sortedAndFilteredNetworks.length ? 'bg-gray-700 text-gray-500 cursor-not-allowed' : 'bg-gray-700 text-gray-200 hover:bg-gray-600 border border-gray-600'
+                  }`}
+                >
+                  Next →
+                </button>
+              </div>
+            </div>
+          )}
+        </>
       ) : (
+        /* Table View */
         <div className="bg-gray-800 rounded-xl shadow-sm border border-gray-700 overflow-hidden">
           <div className="overflow-x-auto">
             <table className="w-full">

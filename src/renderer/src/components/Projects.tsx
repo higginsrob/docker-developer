@@ -1,6 +1,7 @@
 import React, { useEffect, useState, useCallback, useMemo } from 'react';
 import io from 'socket.io-client';
 import { SelectedContext } from './ChatPanel';
+import ViewToggle from './ViewToggle';
 import {
   MagnifyingGlassIcon,
   FolderIcon,
@@ -33,11 +34,31 @@ const Projects: React.FC<ProjectsProps> = ({ selectedContext, onContextSelect, o
   const [filter, setFilter] = useState('');
   const [sortConfig, setSortConfig] = useState<{ key: keyof Project; direction: 'ascending' | 'descending' } | null>(null);
   const [currentPage, setCurrentPage] = useState(1);
+  const [viewMode, setViewMode] = useState<'table' | 'card'>('table');
   const itemsPerPage = 25;
 
   const handleSetSelectedProject = useCallback((projectPath: string) => {
     onContextSelect({ type: 'project', path: projectPath });
   }, [onContextSelect]);
+
+  // Load view preferences
+  useEffect(() => {
+    socket.emit('getViewPreferences');
+    socket.on('viewPreferences', (preferences: Record<string, 'table' | 'card'>) => {
+      if (preferences.projects) {
+        setViewMode(preferences.projects);
+      }
+    });
+    return () => {
+      socket.off('viewPreferences');
+    };
+  }, []);
+
+  // Handle view mode change
+  const handleViewModeChange = (mode: 'table' | 'card') => {
+    setViewMode(mode);
+    socket.emit('saveViewPreference', { view: 'projects', mode });
+  };
 
   useEffect(() => {
     socket.emit('getProjects');
@@ -128,13 +149,16 @@ const Projects: React.FC<ProjectsProps> = ({ selectedContext, onContextSelect, o
               {projects.length} project{projects.length !== 1 ? 's' : ''} found
             </p>
           </div>
-          <button 
-            onClick={handleAddProject}
-            className="flex items-center space-x-2 bg-docker-blue hover:bg-blue-600 text-white font-medium px-5 py-2.5 rounded-lg shadow-md hover:shadow-lg transition-all duration-200"
-          >
-            <span className="text-lg">+</span>
-            <span>Add Project</span>
-          </button>
+          <div className="flex items-center space-x-3">
+            <ViewToggle viewMode={viewMode} onViewModeChange={handleViewModeChange} />
+            <button 
+              onClick={handleAddProject}
+              className="flex items-center space-x-2 bg-docker-blue hover:bg-blue-600 text-white font-medium px-5 py-2.5 rounded-lg shadow-md hover:shadow-lg transition-all duration-200"
+            >
+              <span className="text-lg">+</span>
+              <span>Add Project</span>
+            </button>
+          </div>
         </div>
 
         {/* Search Bar */}
@@ -157,7 +181,7 @@ const Projects: React.FC<ProjectsProps> = ({ selectedContext, onContextSelect, o
         </div>
       </div>
 
-      {/* Projects Table */}
+      {/* Projects View */}
       {projects.length === 0 ? (
         <div className="bg-gray-800 rounded-xl shadow-sm border border-gray-700 p-12 text-center">
           <div className="text-6xl mb-4">📂</div>
@@ -170,7 +194,157 @@ const Projects: React.FC<ProjectsProps> = ({ selectedContext, onContextSelect, o
             Add Project
           </button>
         </div>
+      ) : viewMode === 'card' ? (
+        /* Card View */
+        <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-6">
+          {paginatedProjects.map((project) => {
+            const isSelected = selectedContext?.type === 'project' && selectedContext.path === project.path;
+            
+            return (
+              <div
+                key={project.path}
+                className={`bg-gray-800 rounded-xl shadow-sm border border-gray-700 p-6 hover:shadow-md transition-all duration-200 ${
+                  isSelected ? 'ring-2 ring-blue-500' : ''
+                } ${!project.exists ? 'opacity-60' : ''}`}
+              >
+                <div className="flex items-start justify-between mb-4">
+                  <div className="flex items-center space-x-3">
+                    <FolderIcon className="w-8 h-8 text-blue-400" />
+                    <div>
+                      <h4 className="text-lg font-semibold text-gray-100">{getProjectName(project.path)}</h4>
+                      {isSelected && (
+                        <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-blue-900 text-blue-200">
+                          Active
+                        </span>
+                      )}
+                      {!project.exists && (
+                        <span className="text-xs text-red-400 flex items-center space-x-1">
+                          <span>⚠️</span>
+                          <span>Not Found</span>
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                </div>
+
+                <div className="space-y-3 mb-4">
+                  {project.branch && (
+                    <div>
+                      <span className="text-xs text-gray-400 font-medium">Branch</span>
+                      <div className="mt-1">
+                        <span className="font-mono text-sm text-gray-200 bg-gray-700 px-2 py-1 rounded">
+                          {project.branch}
+                        </span>
+                      </div>
+                    </div>
+                  )}
+                  
+                  {project.gitStatus && (
+                    <div>
+                      <span className="text-xs text-gray-400 font-medium">Git Status</span>
+                      <div className="flex items-center space-x-2 mt-1">
+                        {project.gitStatus.added > 0 && (
+                          <span className="text-green-400 font-semibold text-sm">+{project.gitStatus.added}</span>
+                        )}
+                        {project.gitStatus.removed > 0 && (
+                          <span className="text-red-400 font-semibold text-sm">-{project.gitStatus.removed}</span>
+                        )}
+                        {project.gitStatus.added === 0 && project.gitStatus.removed === 0 && (
+                          <span className="text-gray-400 text-sm">Clean</span>
+                        )}
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                <div className="flex items-center space-x-2 pt-4 border-t border-gray-700">
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      if (project.exists && onOpenProjectShell) {
+                        onOpenProjectShell(project.path);
+                      }
+                    }}
+                    disabled={!project.exists}
+                    className={`flex-1 py-2 px-4 rounded-lg text-sm font-medium transition-colors flex items-center justify-center space-x-1 ${
+                      !project.exists
+                        ? 'bg-gray-700 text-gray-500 cursor-not-allowed'
+                        : 'bg-blue-600 text-white hover:bg-blue-700'
+                    }`}
+                    title="Open shell in terminal"
+                  >
+                    <CommandLineIcon className="w-4 h-4" />
+                    <span>Shell</span>
+                  </button>
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      handleSetSelectedProject(project.path);
+                    }}
+                    disabled={!project.exists}
+                    className={`flex-1 py-2 px-4 rounded-lg text-sm font-medium transition-colors flex items-center justify-center space-x-1 ${
+                      isSelected
+                        ? 'bg-green-600 text-white cursor-default'
+                        : !project.exists
+                        ? 'bg-gray-700 text-gray-500 cursor-not-allowed'
+                        : 'bg-green-600 text-white hover:bg-green-700'
+                    }`}
+                  >
+                    {isSelected && <CheckIcon className="w-4 h-4" />}
+                    <span>{isSelected ? 'Selected' : 'Select'}</span>
+                  </button>
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      handleRemoveProject(project.path);
+                    }}
+                    className="flex-1 py-2 px-4 rounded-lg text-sm font-medium transition-colors bg-red-600 text-white hover:bg-red-700 flex items-center justify-center space-x-1"
+                  >
+                    <TrashIcon className="w-4 h-4" />
+                    <span>Remove</span>
+                  </button>
+                </div>
+              </div>
+            );
+          })}
+          {/* Pagination for Card View */}
+          {sortedAndFilteredProjects.length > itemsPerPage && (
+            <div className="bg-gray-800 px-6 py-4 rounded-lg border border-gray-700 flex items-center justify-between mt-6">
+              <div className="text-sm text-gray-300">
+                Showing {((currentPage - 1) * itemsPerPage) + 1} to {Math.min(currentPage * itemsPerPage, sortedAndFilteredProjects.length)} of {sortedAndFilteredProjects.length} projects
+              </div>
+              <div className="flex items-center space-x-2">
+                <button
+                  onClick={() => setCurrentPage(p => Math.max(1, p - 1))}
+                  disabled={currentPage === 1}
+                  className={`px-4 py-2 rounded-lg font-medium transition-colors ${
+                    currentPage === 1
+                      ? 'bg-gray-700 text-gray-500 cursor-not-allowed'
+                      : 'bg-gray-700 text-gray-200 hover:bg-gray-600 border border-gray-600'
+                  }`}
+                >
+                  ← Previous
+                </button>
+                <span className="px-4 py-2 text-sm font-medium text-gray-200">
+                  Page {currentPage} of {Math.ceil(sortedAndFilteredProjects.length / itemsPerPage)}
+                </span>
+                <button
+                  onClick={() => setCurrentPage(p => p + 1)}
+                  disabled={currentPage * itemsPerPage >= sortedAndFilteredProjects.length}
+                  className={`px-4 py-2 rounded-lg font-medium transition-colors ${
+                    currentPage * itemsPerPage >= sortedAndFilteredProjects.length
+                      ? 'bg-gray-700 text-gray-500 cursor-not-allowed'
+                      : 'bg-gray-700 text-gray-200 hover:bg-gray-600 border border-gray-600'
+                  }`}
+                >
+                  Next →
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
       ) : (
+        /* Table View */
         <div className="bg-gray-800 rounded-xl shadow-sm border border-gray-700 overflow-hidden">
           <div className="overflow-x-auto">
             <table className="w-full">

@@ -13,17 +13,6 @@ interface RAGConfig {
   embeddingModel: string; // Model to use for embeddings
 }
 
-interface FileChunk {
-  id?: number;
-  projectPath: string | null;
-  containerId: string | null;
-  filePath: string;
-  content: string;
-  chunkIndex: number;
-  lastModified: Date;
-  embedding?: Float32Array;
-}
-
 interface SimilarFileChunk {
   id: number;
   filePath: string;
@@ -122,49 +111,48 @@ export class RAGService {
    * Initialize the database and load sql.js
    */
   async initialize(): Promise<void> {
-    console.log('=== RAG Service initialize() called ===');
-    console.log('Starting initialization process...');
+    // console.log('=== RAG Service initialize() called ===');
+    // console.log('Starting initialization process...');
     
     try {
-      console.log('Loading sql.js library...');
       this.sqlJsLib = await initSqlJs();
-      console.log('[✓] sql.js library loaded successfully');
+      // console.log('[✓] sql.js library loaded successfully');
       
-      console.log('=== RAG Service Initialization ===');
-      console.log('Initializing RAG service...');
-      console.log('Database path:', this.dbPath);
+      // console.log('=== RAG Service Initialization ===');
+      // console.log('Initializing RAG service...');
+      // console.log('Database path:', this.dbPath);
       
       // Ensure userData directory exists
       const userDataDir = path.dirname(this.dbPath);
       if (!fs.existsSync(userDataDir)) {
-        console.log('Creating userData directory:', userDataDir);
+        // console.log('Creating userData directory:', userDataDir);
         fs.mkdirSync(userDataDir, { recursive: true });
       }
       
-      console.log('Loading or creating database...');
+      // console.log('Loading or creating database...');
       
       // Load existing database or create new one
       if (fs.existsSync(this.dbPath)) {
         const buffer = fs.readFileSync(this.dbPath);
         this.db = new this.sqlJsLib.Database(buffer);
-        console.log('[✓] Database loaded from file');
+        // console.log('[✓] Database loaded from file');
       } else {
         this.db = new this.sqlJsLib.Database();
-        console.log('[✓] New database created');
+        // console.log('[✓] New database created');
       }
       
       // Create tables
-      console.log('Creating database tables...');
+      // console.log('Creating database tables...');
       this.createTables();
-      console.log('Database tables created');
+      // console.log('Database tables created');
       
       // Initialize embedding model
-      console.log('Loading embedding model...');
+      // console.log('Loading embedding model...');
       await this.initializeEmbeddingModel();
-      console.log('[✓] Embedding model loaded');
+      // console.log('[✓] Embedding model loaded');
       
-      console.log('=== RAG Service Initialization Complete ===');
-      console.log('RAG service initialized successfully - database ready');
+      // console.log('=== RAG Service Initialization Complete ===');
+      // console.log('RAG service initialized successfully - database ready');
     } catch (error: any) {
       console.error('=== RAG Service Initialization Failed ===');
       console.error('Failed to initialize RAG service:', error);
@@ -293,8 +281,8 @@ export class RAGService {
       // Use a production-ready embedding model optimized for semantic search
       // 'Xenova/all-MiniLM-L6-v2' is a quantized version of sentence-transformers/all-MiniLM-L6-v2
       // It provides 384-dimensional embeddings with excellent semantic understanding
-      console.log('Loading advanced embedding model: Xenova/all-MiniLM-L6-v2');
-      console.log('This may take a moment on first run as the model downloads...');
+      // console.log('Loading advanced embedding model: Xenova/all-MiniLM-L6-v2');
+      // console.log('This may take a moment on first run as the model downloads...');
       
       this.embeddingPipeline = await pipeline(
         'feature-extraction',
@@ -302,7 +290,7 @@ export class RAGService {
         { quantized: true }
       );
       this.embeddingModelLoaded = true;
-      console.log('[✓] Advanced embedding model loaded successfully');
+      // console.log('[✓] Advanced embedding model loaded successfully');
     } catch (error: any) {
       console.error('Failed to load embedding model:', error);
       console.error('Error details:', {
@@ -589,7 +577,7 @@ export class RAGService {
       if (fs.existsSync(configPath)) {
         const data = fs.readFileSync(configPath, 'utf8');
         this.config = { ...this.config, ...JSON.parse(data) };
-        console.log('RAG config loaded:', this.config);
+        // console.log('RAG config loaded:', this.config);
       }
     } catch (error) {
       console.error('Failed to load RAG config:', error);

@@ -1,6 +1,7 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useMemo } from 'react';
 import io from 'socket.io-client';
-import { RocketLaunchIcon, PencilIcon, TrashIcon, CheckIcon, SparklesIcon, ArrowPathIcon, CheckCircleIcon, XCircleIcon } from '@heroicons/react/24/outline';
+import ViewToggle from './ViewToggle';
+import { RocketLaunchIcon, PencilIcon, TrashIcon, CheckIcon, SparklesIcon, ArrowPathIcon, CheckCircleIcon, XCircleIcon, MagnifyingGlassIcon } from '@heroicons/react/24/outline';
 
 const socket = io('http://localhost:3002');
 
@@ -50,6 +51,8 @@ const DevEnvironments: React.FC<DevEnvironmentsProps> = ({ onLaunch, initialGitH
   const [launchStatus, setLaunchStatus] = useState<{ success: boolean; message: string } | null>(null);
   const [containerStatuses, setContainerStatuses] = useState<{ [key: string]: { running: boolean; exists: boolean } }>({});
   const [projectGitUrls, setProjectGitUrls] = useState<string[]>([]);
+  const [viewMode, setViewMode] = useState<'table' | 'card'>('table');
+  const [filter, setFilter] = useState('');
   
   const initialFormData: DevEnvironment = {
     name: '',
@@ -104,6 +107,25 @@ const DevEnvironments: React.FC<DevEnvironmentsProps> = ({ onLaunch, initialGitH
 
   const resetForm = () => {
     setFormData(initialFormData);
+  };
+
+  // Load view preferences
+  useEffect(() => {
+    socket.emit('getViewPreferences');
+    socket.on('viewPreferences', (preferences: Record<string, 'table' | 'card'>) => {
+      if (preferences.devEnvironments) {
+        setViewMode(preferences.devEnvironments);
+      }
+    });
+    return () => {
+      socket.off('viewPreferences');
+    };
+  }, []);
+
+  // Handle view mode change
+  const handleViewModeChange = (mode: 'table' | 'card') => {
+    setViewMode(mode);
+    socket.emit('saveViewPreference', { view: 'devEnvironments', mode });
   };
 
   useEffect(() => {
@@ -285,6 +307,16 @@ const DevEnvironments: React.FC<DevEnvironmentsProps> = ({ onLaunch, initialGitH
     return args.join(' ');
   };
 
+  // Filter dev environments
+  const filteredDevEnvironments = useMemo(() => {
+    if (!filter) return devEnvironments;
+    return devEnvironments.filter(env =>
+      env.name.toLowerCase().includes(filter.toLowerCase()) ||
+      env.image.toLowerCase().includes(filter.toLowerCase()) ||
+      (env.containerName && env.containerName.toLowerCase().includes(filter.toLowerCase()))
+    );
+  }, [devEnvironments, filter]);
+
   return (
     <div className="space-y-6">
       {/* Launch Status Message */}
@@ -306,27 +338,51 @@ const DevEnvironments: React.FC<DevEnvironmentsProps> = ({ onLaunch, initialGitH
       )}
 
       {/* Header */}
-      <div className="flex items-center justify-between">
-        <div>
-          <h3 className="text-2xl font-bold text-gray-900">Dev Environments</h3>
-          <p className="text-sm text-gray-500 mt-1">
-            {devEnvironments.length} dev environment{devEnvironments.length !== 1 ? 's' : ''}
-          </p>
+      <div className="space-y-4">
+        <div className="flex items-center justify-between">
+          <div>
+            <h3 className="text-2xl font-bold text-gray-100">Dev Environments</h3>
+            <p className="text-sm text-gray-400 mt-1">
+              {devEnvironments.length} dev environment{devEnvironments.length !== 1 ? 's' : ''}
+            </p>
+          </div>
+          <div className="flex items-center space-x-3">
+            <ViewToggle viewMode={viewMode} onViewModeChange={handleViewModeChange} />
+            <button
+              onClick={() => { resetForm(); setShowForm(!showForm); }}
+              className="flex items-center space-x-2 bg-docker-blue hover:bg-blue-600 text-white font-medium px-5 py-2.5 rounded-lg shadow-md hover:shadow-lg transition-all duration-200"
+            >
+              <span className="text-lg">+</span>
+              <span>Create Dev Environment</span>
+            </button>
+          </div>
         </div>
-        <button
-          onClick={() => { resetForm(); setShowForm(!showForm); }}
-          className="flex items-center space-x-2 bg-docker-blue hover:bg-blue-600 text-white font-medium px-5 py-2.5 rounded-lg shadow-md hover:shadow-lg transition-all duration-200"
-        >
-          <span className="text-lg">+</span>
-          <span>Create Dev Environment</span>
-        </button>
+
+        {/* Search Bar */}
+        <div className="flex items-center space-x-3">
+          <div className="flex-1 relative">
+            <div className="absolute left-3 top-1/2 transform -translate-y-1/2 text-gray-500">
+              <MagnifyingGlassIcon className="w-5 h-5" />
+            </div>
+            <input
+              type="text"
+              placeholder="Filter by name or image..."
+              value={filter}
+              onChange={(e) => setFilter(e.target.value)}
+              className="w-full px-4 py-3 pl-10 border border-gray-600 rounded-lg bg-gray-800 text-gray-200 placeholder-gray-500 focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none transition-all"
+            />
+          </div>
+          <div className="text-sm text-gray-400">
+            {filteredDevEnvironments.length} results
+          </div>
+        </div>
       </div>
 
       {/* Create/Edit Form */}
       {showForm && (
-        <form onSubmit={handleSubmit} className="bg-white rounded-xl shadow-sm border border-gray-100 p-6 space-y-6 animate-slide-in">
-          <div className="flex items-center justify-between border-b border-gray-200 pb-4">
-            <h3 className="text-xl font-bold text-gray-900 flex items-center space-x-2">
+        <form onSubmit={handleSubmit} className="bg-gray-800 rounded-xl shadow-sm border border-gray-700 p-6 space-y-6 animate-slide-in">
+          <div className="flex items-center justify-between border-b border-gray-700 pb-4">
+            <h3 className="text-xl font-bold text-gray-100 flex items-center space-x-2">
               {isEditing ? (
                 <>
                   <PencilIcon className="w-6 h-6" />
@@ -342,7 +398,7 @@ const DevEnvironments: React.FC<DevEnvironmentsProps> = ({ onLaunch, initialGitH
             <button
               type="button"
               onClick={() => setShowForm(false)}
-              className="text-gray-400 hover:text-gray-600 text-2xl"
+              className="text-gray-400 hover:text-gray-200 text-2xl"
             >
               ×
             </button>
@@ -350,49 +406,49 @@ const DevEnvironments: React.FC<DevEnvironmentsProps> = ({ onLaunch, initialGitH
 
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-2">Environment Name *</label>
+              <label className="block text-sm font-medium text-gray-200 mb-2">Environment Name *</label>
               <input 
                 name="name" 
                 value={formData.name} 
                 onChange={handleInputChange} 
                 placeholder="e.g., my-dev-env" 
                 required 
-                className="input-field"
+                className="w-full px-4 py-2 border border-gray-600 rounded-lg bg-gray-700 text-gray-200 placeholder-gray-500 focus:ring-2 focus:ring-blue-500 focus:border-transparent"
               />
             </div>
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-2">Docker Image *</label>
+              <label className="block text-sm font-medium text-gray-200 mb-2">Docker Image *</label>
               <input 
                 name="image" 
                 value={formData.image} 
                 onChange={handleInputChange} 
                 placeholder="e.g., node:latest" 
                 required 
-                className="input-field"
+                className="w-full px-4 py-2 border border-gray-600 rounded-lg bg-gray-700 text-gray-200 placeholder-gray-500 focus:ring-2 focus:ring-blue-500 focus:border-transparent"
               />
             </div>
           </div>
 
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-2">Container Name</label>
+              <label className="block text-sm font-medium text-gray-200 mb-2">Container Name</label>
               <input 
                 name="containerName" 
                 value={formData.containerName} 
                 onChange={handleInputChange} 
                 placeholder="e.g., my-container" 
-                className="input-field"
+                className="w-full px-4 py-2 border border-gray-600 rounded-lg bg-gray-700 text-gray-200 placeholder-gray-500 focus:ring-2 focus:ring-blue-500 focus:border-transparent"
               />
             </div>
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-2">GitHub Repository</label>
+              <label className="block text-sm font-medium text-gray-200 mb-2">GitHub Repository</label>
               <input 
                 name="githubRepo" 
                 value={formData.githubRepo} 
                 onChange={handleInputChange} 
                 placeholder="e.g., https://github.com/user/repo.git" 
                 list="github-repos"
-                className="input-field"
+                className="w-full px-4 py-2 border border-gray-600 rounded-lg bg-gray-700 text-gray-200 placeholder-gray-500 focus:ring-2 focus:ring-blue-500 focus:border-transparent"
               />
               {projectGitUrls.length > 0 && (
                 <datalist id="github-repos">
@@ -401,22 +457,22 @@ const DevEnvironments: React.FC<DevEnvironmentsProps> = ({ onLaunch, initialGitH
                   ))}
                 </datalist>
               )}
-              <p className="text-xs text-gray-500 mt-1">
+                <p className="text-xs text-gray-400 mt-1">
                 If provided, the container will clone this repo into /workspace on startup
               </p>
             </div>
           </div>
 
-          <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
-            <p className="text-sm text-blue-800">
+          <div className="bg-blue-900 border border-blue-700 rounded-lg p-4">
+            <p className="text-sm text-blue-200">
               <strong>Note:</strong> All dev environments launch with:
-              <br />• Working directory: <code className="bg-blue-100 px-1 rounded">/workspace</code>
-              <br />• Volume: <code className="bg-blue-100 px-1 rounded">/workspace</code> (persistent)
+              <br />• Working directory: <code className="bg-blue-800 text-blue-100 px-1 rounded">/workspace</code>
+              <br />• Volume: <code className="bg-blue-800 text-blue-100 px-1 rounded">/workspace</code> (persistent)
               <br />• zsh will be installed automatically if not present and set as root's default shell
               <br />• oh-my-zsh will be installed automatically if not present
               {formData.githubRepo && (
                 <>
-                  <br />• GitHub Repo: <code className="bg-blue-100 px-1 rounded">{formData.githubRepo}</code>
+                  <br />• GitHub Repo: <code className="bg-blue-800 text-blue-100 px-1 rounded">{formData.githubRepo}</code>
                   <br />• Git will be installed automatically if needed
                 </>
               )}
@@ -430,12 +486,12 @@ const DevEnvironments: React.FC<DevEnvironmentsProps> = ({ onLaunch, initialGitH
                 type="checkbox" 
                 checked={formData.privileged} 
                 onChange={handleInputChange} 
-                className="w-4 h-4 text-docker-blue border-gray-300 rounded focus:ring-docker-blue"
+                className="w-4 h-4 text-docker-blue border-gray-600 bg-gray-700 rounded focus:ring-docker-blue"
               />
-              <span className="text-sm font-medium text-gray-700">Privileged</span>
+              <span className="text-sm font-medium text-gray-200">Privileged</span>
             </label>
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-2">Pull Policy</label>
+              <label className="block text-sm font-medium text-gray-200 mb-2">Pull Policy</label>
               <select name="pull" value={formData.pull} onChange={handleInputChange} className="input-field">
                 <option value="">Never</option>
                 <option value="always">Always</option>
@@ -446,66 +502,66 @@ const DevEnvironments: React.FC<DevEnvironmentsProps> = ({ onLaunch, initialGitH
 
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-2">Restart Policy</label>
+              <label className="block text-sm font-medium text-gray-200 mb-2">Restart Policy</label>
               <input 
                 name="restart" 
                 value={formData.restart} 
                 onChange={handleInputChange} 
                 placeholder="e.g., always" 
-                className="input-field"
+                className="w-full px-4 py-2 border border-gray-600 rounded-lg bg-gray-700 text-gray-200 placeholder-gray-500 focus:ring-2 focus:ring-blue-500 focus:border-transparent"
               />
             </div>
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-2">Platform</label>
+              <label className="block text-sm font-medium text-gray-200 mb-2">Platform</label>
               <input 
                 name="platform" 
                 value={formData.platform} 
                 onChange={handleInputChange} 
                 placeholder="e.g., linux/amd64" 
-                className="input-field"
+                className="w-full px-4 py-2 border border-gray-600 rounded-lg bg-gray-700 text-gray-200 placeholder-gray-500 focus:ring-2 focus:ring-blue-500 focus:border-transparent"
               />
             </div>
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-2">Runtime</label>
+              <label className="block text-sm font-medium text-gray-200 mb-2">Runtime</label>
               <input 
                 name="runtime" 
                 value={formData.runtime} 
                 onChange={handleInputChange} 
                 placeholder="e.g., runc" 
-                className="input-field"
+                className="w-full px-4 py-2 border border-gray-600 rounded-lg bg-gray-700 text-gray-200 placeholder-gray-500 focus:ring-2 focus:ring-blue-500 focus:border-transparent"
               />
             </div>
           </div>
 
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-2">Network</label>
+              <label className="block text-sm font-medium text-gray-200 mb-2">Network</label>
               <input 
                 name="network" 
                 value={formData.network} 
                 onChange={handleInputChange} 
                 placeholder="e.g., bridge" 
-                className="input-field"
+                className="w-full px-4 py-2 border border-gray-600 rounded-lg bg-gray-700 text-gray-200 placeholder-gray-500 focus:ring-2 focus:ring-blue-500 focus:border-transparent"
               />
             </div>
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-2">Memory</label>
+              <label className="block text-sm font-medium text-gray-200 mb-2">Memory</label>
               <input 
                 name="memory" 
                 value={formData.memory} 
                 onChange={handleInputChange} 
                 placeholder="e.g., 512m" 
-                className="input-field"
+                className="w-full px-4 py-2 border border-gray-600 rounded-lg bg-gray-700 text-gray-200 placeholder-gray-500 focus:ring-2 focus:ring-blue-500 focus:border-transparent"
               />
             </div>
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-2">CPUs</label>
+              <label className="block text-sm font-medium text-gray-200 mb-2">CPUs</label>
               <input 
                 name="cpus" 
                 value={formData.cpus} 
                 onChange={handleInputChange} 
                 placeholder="e.g., 1.5" 
-                className="input-field"
+                className="w-full px-4 py-2 border border-gray-600 rounded-lg bg-gray-700 text-gray-200 placeholder-gray-500 focus:ring-2 focus:ring-blue-500 focus:border-transparent"
               />
             </div>
           </div>
@@ -684,24 +740,24 @@ const DevEnvironments: React.FC<DevEnvironmentsProps> = ({ onLaunch, initialGitH
             ))}
           </div>
 
-          <div className="flex items-center justify-end space-x-3 pt-4 border-t border-gray-200">
+          <div className="flex items-center justify-end space-x-3 pt-4 border-t border-gray-700">
             <button 
               type="button" 
               onClick={() => setShowForm(false)}
-              className="btn-secondary"
+              className="px-6 py-2 border border-gray-600 text-gray-200 rounded-lg hover:bg-gray-700 font-medium transition-colors"
             >
               Cancel
             </button>
             <button 
               type="button" 
               onClick={resetForm}
-              className="btn-secondary"
+              className="px-6 py-2 border border-gray-600 text-gray-200 rounded-lg hover:bg-gray-700 font-medium transition-colors"
             >
               Reset
             </button>
             <button 
               type="submit"
-              className="btn-primary"
+              className="px-6 py-2 bg-docker-blue hover:bg-blue-600 text-white rounded-lg font-medium shadow-md hover:shadow-lg transition-all duration-200"
             >
               {isEditing ? (
                 <>
@@ -723,10 +779,10 @@ const DevEnvironments: React.FC<DevEnvironmentsProps> = ({ onLaunch, initialGitH
       {!showForm && (
         <div className="space-y-4">
           {devEnvironments.length === 0 ? (
-            <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-12 text-center">
-              <RocketLaunchIcon className="w-16 h-16 mx-auto mb-4 text-gray-400" />
-              <h3 className="text-xl font-semibold text-gray-700 mb-2">No Dev Environments</h3>
-              <p className="text-gray-500 mb-6">Create your first dev environment to get started</p>
+            <div className="bg-gray-800 rounded-xl shadow-sm border border-gray-700 p-12 text-center">
+              <RocketLaunchIcon className="w-16 h-16 mx-auto mb-4 text-gray-500" />
+              <h3 className="text-xl font-semibold text-gray-200 mb-2">No Dev Environments</h3>
+              <p className="text-gray-400 mb-6">Create your first dev environment to get started</p>
               <button
                 onClick={() => { resetForm(); setShowForm(true); }}
                 className="bg-docker-blue hover:bg-blue-600 text-white font-medium px-6 py-3 rounded-lg shadow-md hover:shadow-lg transition-all duration-200"
@@ -734,21 +790,22 @@ const DevEnvironments: React.FC<DevEnvironmentsProps> = ({ onLaunch, initialGitH
                 Create Dev Environment
               </button>
             </div>
-          ) : (
+          ) : viewMode === 'card' ? (
+            /* Card View */
             <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-6">
-              {devEnvironments.map((env) => {
+              {filteredDevEnvironments.map((env) => {
                 const [imageName, tag = 'latest'] = env.image.split(':');
                 return (
                   <div
                     key={env.name}
-                    className="bg-white rounded-xl shadow-sm border border-gray-100 p-6 hover:shadow-md transition-all duration-200"
+                    className="bg-gray-800 rounded-xl shadow-sm border border-gray-700 p-6 hover:shadow-md transition-all duration-200"
                   >
                     <div className="flex items-start justify-between mb-4">
                       <div className="flex items-center space-x-3">
-                        <RocketLaunchIcon className="w-8 h-8 text-purple-500" />
+                        <RocketLaunchIcon className="w-8 h-8 text-purple-400" />
                         <div>
-                          <h4 className="text-lg font-semibold text-gray-900">{env.name}</h4>
-                          <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-green-100 text-green-800">
+                          <h4 className="text-lg font-semibold text-gray-100">{env.name}</h4>
+                          <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-green-900 text-green-200">
                             Dev Environment
                           </span>
                         </div>
@@ -757,11 +814,11 @@ const DevEnvironments: React.FC<DevEnvironmentsProps> = ({ onLaunch, initialGitH
 
                     <div className="space-y-3 mb-4">
                       <div>
-                        <span className="text-xs text-gray-500 font-medium">Image</span>
+                        <span className="text-xs text-gray-400 font-medium">Image</span>
                         <div className="flex items-center space-x-2 mt-1">
-                          <span className="text-sm font-mono text-gray-700 bg-gray-100 px-2 py-1 rounded">{imageName}</span>
-                          <span className="text-sm font-mono text-gray-600">:</span>
-                          <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-green-100 text-green-800">
+                          <span className="text-sm font-mono text-gray-200 bg-gray-700 px-2 py-1 rounded">{imageName}</span>
+                          <span className="text-sm font-mono text-gray-300">:</span>
+                          <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-green-900 text-green-200">
                             {tag}
                           </span>
                         </div>
@@ -769,10 +826,10 @@ const DevEnvironments: React.FC<DevEnvironmentsProps> = ({ onLaunch, initialGitH
 
                       {env.ports && env.ports.length > 0 && (
                         <div>
-                          <span className="text-xs text-gray-500 font-medium">Ports</span>
+                          <span className="text-xs text-gray-400 font-medium">Ports</span>
                           <div className="flex flex-wrap gap-2 mt-1">
                             {env.ports.map((p, i) => (
-                              <span key={i} className="text-xs font-mono bg-blue-50 text-blue-700 px-2 py-1 rounded">
+                              <span key={i} className="text-xs font-mono bg-blue-900 text-blue-200 px-2 py-1 rounded">
                                 {p.host}:{p.container}
                               </span>
                             ))}
@@ -782,15 +839,15 @@ const DevEnvironments: React.FC<DevEnvironmentsProps> = ({ onLaunch, initialGitH
 
                       {generateArguments(env) && (
                         <div>
-                          <span className="text-xs text-gray-500 font-medium">Arguments</span>
-                          <div className="text-xs font-mono text-gray-600 bg-gray-50 px-2 py-1 rounded mt-1">
+                          <span className="text-xs text-gray-400 font-medium">Arguments</span>
+                          <div className="text-xs font-mono text-gray-300 bg-gray-700 px-2 py-1 rounded mt-1">
                             {generateArguments(env)}
                           </div>
                         </div>
                       )}
                     </div>
 
-                    <div className="flex items-center space-x-2 pt-4 border-t border-gray-200">
+                    <div className="flex items-center space-x-2 pt-4 border-t border-gray-700">
                       {(() => {
                         const containerName = env.containerName || env.name;
                         const status = containerStatuses[containerName];
@@ -801,8 +858,8 @@ const DevEnvironments: React.FC<DevEnvironmentsProps> = ({ onLaunch, initialGitH
                             onClick={() => handleLaunchDevEnvironment(env)}
                             className={`flex-1 py-2 px-4 ${
                               isRunning 
-                                ? 'bg-yellow-100 hover:bg-yellow-200 text-yellow-700' 
-                                : 'bg-green-100 hover:bg-green-200 text-green-700'
+                                ? 'bg-yellow-600 hover:bg-yellow-700 text-white' 
+                                : 'bg-green-600 hover:bg-green-700 text-white'
                             } font-medium rounded-lg transition-colors`}
                           >
                             {isRunning ? (
@@ -821,14 +878,14 @@ const DevEnvironments: React.FC<DevEnvironmentsProps> = ({ onLaunch, initialGitH
                       })()}
                       <button
                         onClick={() => handleSelectDevEnvironment(env.name)}
-                        className="flex-1 py-2 px-4 bg-blue-100 hover:bg-blue-200 text-blue-700 font-medium rounded-lg transition-colors flex items-center justify-center space-x-1"
+                        className="flex-1 py-2 px-4 bg-blue-600 hover:bg-blue-700 text-white font-medium rounded-lg transition-colors flex items-center justify-center space-x-1"
                       >
                         <PencilIcon className="w-4 h-4" />
                         <span>Edit</span>
                       </button>
                       <button
                         onClick={() => handleDeleteDevEnvironment(env.name)}
-                        className="flex-1 py-2 px-4 bg-red-100 hover:bg-red-200 text-red-700 font-medium rounded-lg transition-colors flex items-center justify-center space-x-1"
+                        className="flex-1 py-2 px-4 bg-red-600 hover:bg-red-700 text-white font-medium rounded-lg transition-colors flex items-center justify-center space-x-1"
                       >
                         <TrashIcon className="w-4 h-4" />
                         <span>Remove</span>
@@ -837,6 +894,121 @@ const DevEnvironments: React.FC<DevEnvironmentsProps> = ({ onLaunch, initialGitH
                   </div>
                 );
               })}
+            </div>
+          ) : (
+            /* Table View */
+            <div className="bg-gray-800 rounded-xl shadow-sm border border-gray-700 overflow-hidden">
+              <div className="overflow-x-auto">
+                <table className="w-full">
+                  <thead className="bg-gray-700 border-b border-gray-600">
+                    <tr>
+                      <th className="px-6 py-4 text-left text-xs font-semibold text-gray-300 uppercase tracking-wider">
+                        Name
+                      </th>
+                      <th className="px-6 py-4 text-left text-xs font-semibold text-gray-300 uppercase tracking-wider">
+                        Image
+                      </th>
+                      <th className="px-6 py-4 text-left text-xs font-semibold text-gray-300 uppercase tracking-wider">
+                        Tag
+                      </th>
+                      <th className="px-6 py-4 text-left text-xs font-semibold text-gray-300 uppercase tracking-wider">
+                        Ports
+                      </th>
+                      <th className="px-6 py-4 text-left text-xs font-semibold text-gray-300 uppercase tracking-wider">
+                        Status
+                      </th>
+                      <th className="px-6 py-4 text-left text-xs font-semibold text-gray-300 uppercase tracking-wider">
+                        Actions
+                      </th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-gray-700">
+                    {filteredDevEnvironments.map((env) => {
+                      const [imageName, tag = 'latest'] = env.image.split(':');
+                      const containerName = env.containerName || env.name;
+                      const status = containerStatuses[containerName];
+                      const isRunning = status && status.exists && status.running;
+                      
+                      return (
+                        <tr key={env.name} className="hover:bg-gray-700 transition-colors">
+                          <td className="px-6 py-4">
+                            <div className="flex items-center space-x-2">
+                              <RocketLaunchIcon className="w-5 h-5 text-purple-400" />
+                              <span className="font-medium text-gray-100">{env.name}</span>
+                            </div>
+                          </td>
+                          <td className="px-6 py-4">
+                            <span className="text-sm font-mono text-gray-200 bg-gray-700 px-2 py-1 rounded">{imageName}</span>
+                          </td>
+                          <td className="px-6 py-4">
+                            <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-green-900 text-green-200">
+                              {tag}
+                            </span>
+                          </td>
+                          <td className="px-6 py-4">
+                            {env.ports && env.ports.length > 0 ? (
+                              <div className="flex flex-wrap gap-1">
+                                {env.ports.map((p, i) => (
+                                  <span key={i} className="text-xs font-mono bg-blue-900 text-blue-200 px-2 py-0.5 rounded">
+                                    {p.host}:{p.container}
+                                  </span>
+                                ))}
+                              </div>
+                            ) : (
+                              <span className="text-sm text-gray-500">—</span>
+                            )}
+                          </td>
+                          <td className="px-6 py-4">
+                            <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium ${
+                              isRunning ? 'bg-green-900 text-green-200' : 'bg-gray-700 text-gray-300'
+                            }`}>
+                              {isRunning ? 'Running' : 'Stopped'}
+                            </span>
+                          </td>
+                          <td className="px-6 py-4">
+                            <div className="flex items-center space-x-2">
+                              <button
+                                onClick={() => handleLaunchDevEnvironment(env)}
+                                className={`px-3 py-1.5 rounded-md text-sm font-medium transition-colors flex items-center space-x-1 ${
+                                  isRunning 
+                                    ? 'bg-yellow-600 hover:bg-yellow-700 text-white' 
+                                    : 'bg-green-600 hover:bg-green-700 text-white'
+                                }`}
+                              >
+                                {isRunning ? (
+                                  <>
+                                    <ArrowPathIcon className="w-4 h-4" />
+                                    <span>Restart</span>
+                                  </>
+                                ) : (
+                                  <>
+                                    <RocketLaunchIcon className="w-4 h-4" />
+                                    <span>Launch</span>
+                                  </>
+                                )}
+                              </button>
+                              <button
+                                onClick={() => handleSelectDevEnvironment(env.name)}
+                                className="px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-md text-sm font-medium transition-colors flex items-center space-x-1"
+                              >
+                                <PencilIcon className="w-4 h-4" />
+                                <span>Edit</span>
+                              </button>
+                              <button
+                                onClick={() => handleDeleteDevEnvironment(env.name)}
+                                className="px-3 py-1.5 bg-red-600 hover:bg-red-700 text-white rounded-md text-sm font-medium transition-colors flex items-center space-x-1"
+                              >
+                                <TrashIcon className="w-4 h-4" />
+                                <span>Remove</span>
+                              </button>
+                            </div>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
             </div>
           )}
         </div>
