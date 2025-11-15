@@ -542,6 +542,9 @@ const ChatPanel = forwardRef<ChatPanelRef, ChatPanelProps>(({ isOpen, onClose, s
   const [showToolsDropdown, setShowToolsDropdown] = useState(false); // Show tools dropdown
   const [globallyEnabledTools, setGloballyEnabledTools] = useState<string[]>([]); // Globally enabled MCP servers
   const [selectedImage, setSelectedImage] = useState<{ data: string; mediaType: string; name: string } | null>(null); // Selected image for upload
+  const [availableSessions, setAvailableSessions] = useState<any[]>([]); // Available sessions for current agent
+  const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null); // Currently selected session
+  const [sessionSummaries, setSessionSummaries] = useState<Map<string, string>>(new Map()); // Session ID -> summary
   const requestTokenUsage = useRef<Map<string, { promptTokens: number; completionTokens?: number; totalTokens?: number; maxContext: number; usagePercent: number; timings?: any }>>(new Map());
   const panelRef = useRef<HTMLDivElement>(null);
   const toolsDropdownRef = useRef<HTMLDivElement>(null);
@@ -677,24 +680,8 @@ const ChatPanel = forwardRef<ChatPanelRef, ChatPanelProps>(({ isOpen, onClose, s
       // Only save and clear if we're actually switching agents or context
       if (isDifferentAgent || isDifferentContext) {
         // Save current session before switching agents or context
-        if (messagesRef.current.length > 0 && previousAgentId) {
-          console.log('Saving session before switching agent/context');
-          const sessionId = currentSessionIdRef.current || Date.now().toString();
-          const session: ChatSession = {
-            id: sessionId,
-            title: messagesRef.current[0]?.content.substring(0, 50) || 'New Chat',
-            messages: messagesRef.current,
-            tokensUsed: 0,
-            changedLines: 0,
-            isProcessing: isWaitingForResponseRef.current,
-            lastUpdated: new Date(),
-          };
-          socket.emit('saveAgentChatSession', { 
-            projectPath: getProjectPathFromContext(previousContextRef.current), 
-            agentId: previousAgentId,
-            session 
-          });
-        }
+        // History is now automatically saved by the backend to history files
+        // No need to save sessions manually
         
         setThinkingTokens(selectedAgent.contextSize);
         // Mark that we're switching agents
@@ -705,8 +692,8 @@ const ChatPanel = forwardRef<ChatPanelRef, ChatPanelProps>(({ isOpen, onClose, s
         setCurrentSessionId(null);
         setCurrentContextUsage(null);
         
-        // Load chat history specific to this agent
-        socket.emit('getAgentChatHistory', { projectPath: getProjectPathFromContext(selectedContext), agentId: agentId });
+        // Load sessions list for this agent (which will also load the current session's history)
+        socket.emit('getAgentSessions', { agentId: agentId });
       }
       // Note: We don't update thinking tokens for same agent/context anymore to avoid loops
       // Users can manually adjust if needed
@@ -724,25 +711,8 @@ const ChatPanel = forwardRef<ChatPanelRef, ChatPanelProps>(({ isOpen, onClose, s
     } else {
       // No agent selected - only clear if we had an agent before
       if (previousAgentId !== null) {
-        // Save current session before clearing if we had an agent selected
-        if (messagesRef.current.length > 0 && previousAgentId) {
-          console.log('Saving session before clearing agent');
-          const sessionId = currentSessionIdRef.current || Date.now().toString();
-          const session: ChatSession = {
-            id: sessionId,
-            title: messagesRef.current[0]?.content.substring(0, 50) || 'New Chat',
-            messages: messagesRef.current,
-            tokensUsed: 0,
-            changedLines: 0,
-            isProcessing: isWaitingForResponseRef.current,
-            lastUpdated: new Date(),
-          };
-          socket.emit('saveAgentChatSession', { 
-            projectPath: getProjectPathFromContext(previousContextRef.current), 
-            agentId: previousAgentId,
-            session 
-          });
-        }
+        // History is now automatically saved by the backend to history files
+        // No need to save sessions manually
         
         // If no agent selected, clear everything
         setMessages([]);
@@ -757,6 +727,22 @@ const ChatPanel = forwardRef<ChatPanelRef, ChatPanelProps>(({ isOpen, onClose, s
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedAgent?.id ?? null, currentContextKey]); // Only depend on agent ID and context key
+
+  // Load history when chat panel opens if we have an agent selected but no messages
+  useEffect(() => {
+    const wasOpen = previousIsOpenRef.current;
+    const isNowOpen = isOpen;
+    
+    // Update the ref
+    previousIsOpenRef.current = isOpen;
+    
+    // If chat just opened and we have an agent selected but no messages, load sessions
+    if (!wasOpen && isNowOpen && selectedAgent && messages.length === 0) {
+      console.log('Chat panel opened with agent selected, loading sessions');
+      isSwitchingAgentRef.current = true;
+      socket.emit('getAgentSessions', { agentId: selectedAgent.id });
+    }
+  }, [isOpen, selectedAgent, messages.length]);
 
   // Save chat panel width to localStorage when it changes
   useEffect(() => {
@@ -848,24 +834,8 @@ const ChatPanel = forwardRef<ChatPanelRef, ChatPanelProps>(({ isOpen, onClose, s
     const wasOpen = previousIsOpenRef.current;
     const isClosing = wasOpen && !isOpen;
     
-    if (isClosing && selectedAgent && messages.length > 0) {
-      console.log('Saving session before closing chat window');
-      const sessionId = currentSessionId || Date.now().toString();
-      const session: ChatSession = {
-        id: sessionId,
-        title: messages[0]?.content.substring(0, 50) || 'New Chat',
-        messages,
-        tokensUsed: 0,
-        changedLines: 0,
-        isProcessing: isWaitingForResponse,
-        lastUpdated: new Date(),
-      };
-      socket.emit('saveAgentChatSession', { 
-        projectPath: getProjectPathFromContext(selectedContext), 
-        agentId: selectedAgent.id,
-        session 
-      });
-    }
+    // History is now automatically saved by the backend to history files
+    // No need to save sessions manually when closing
     
     // Update ref for next comparison
     previousIsOpenRef.current = isOpen;
@@ -1193,22 +1163,7 @@ const ChatPanel = forwardRef<ChatPanelRef, ChatPanelProps>(({ isOpen, onClose, s
             isStreaming: false,
           };
           
-          const sessionId = Date.now().toString();
-          const session: ChatSession = {
-            id: sessionId,
-            title: finalAnswer.substring(0, 50) || 'New Chat',
-            messages: [responseMessage], // Just the response if we can't find the prompt
-            tokensUsed: 0,
-            changedLines: 0,
-            isProcessing: false,
-            lastUpdated: new Date(),
-          };
-          
-          socket.emit('saveAgentChatSession', {
-            projectPath: getProjectPathFromContext(selectedContext),
-            agentId: responseAgentId!,
-            session
-          });
+          // History is now automatically saved by the backend to history files
         } else {
           // Save the complete conversation to that agent's history
           const responseMessage: ChatMessage = {
@@ -1221,22 +1176,7 @@ const ChatPanel = forwardRef<ChatPanelRef, ChatPanelProps>(({ isOpen, onClose, s
             isStreaming: false,
           };
           
-          const sessionId = Date.now().toString();
-          const session: ChatSession = {
-            id: sessionId,
-            title: promptMessage.content.substring(0, 50) || 'New Chat',
-            messages: [promptMessage, responseMessage],
-            tokensUsed: 0,
-            changedLines: 0,
-            isProcessing: false,
-            lastUpdated: new Date(),
-          };
-          
-          socket.emit('saveAgentChatSession', {
-            projectPath: getProjectPathFromContext(selectedContext),
-            agentId: responseAgentId!,
-            session
-          });
+          // History is now automatically saved by the backend to history files
         }
         
         // Calculate metrics and send status message to terminal (for other agent)
@@ -1829,51 +1769,22 @@ const ChatPanel = forwardRef<ChatPanelRef, ChatPanelProps>(({ isOpen, onClose, s
       }
     });
 
-    socket.on('agentChatHistory', (history: ChatSession[]) => {
-      console.log('agentChatHistory received:', history.length, 'sessions, isSwitchingAgentRef:', isSwitchingAgentRef.current);
-      setChatHistory(history);
-      // If we just switched agents and have history, restore the most recent session
-      if (isSwitchingAgentRef.current && history.length > 0) {
-        console.log('Restoring agent chat history, most recent session:', history[history.length - 1].id);
-        // Use a callback to get the current messages from ref
-        setMessages(prev => {
-          // Always restore if we're switching and have history, even if prev has some messages
-          // This ensures we load the correct agent's history
-          if (history.length > 0) {
-            // Load the most recent session
-            const mostRecentSession = history[history.length - 1];
-            if (mostRecentSession && mostRecentSession.messages.length > 0) {
-              console.log('Restoring messages:', mostRecentSession.messages.length);
-              return mostRecentSession.messages;
-            }
-          }
-          return prev;
-        });
-        // Also update session ID if we restored
-        if (history.length > 0) {
-          const mostRecentSession = history[history.length - 1];
-          if (mostRecentSession) {
-            setCurrentSessionId(mostRecentSession.id);
-          }
+    socket.on('agentChatMessages', (messages: ChatMessage[]) => {
+      console.log('agentChatMessages received:', messages.length, 'messages, isSwitchingAgentRef:', isSwitchingAgentRef.current);
+      
+      // If we just switched agents or have no messages, load the history
+      if (isSwitchingAgentRef.current || messagesRef.current.length === 0) {
+        if (messages.length > 0) {
+          console.log('Loading agent chat history:', messages.length, 'messages');
+          setMessages(messages);
+        } else {
+          console.log('No history available for this agent');
+          setMessages([]);
         }
         // Reset the switching flag
         isSwitchingAgentRef.current = false;
-      } else if (history.length > 0) {
-        // Always restore history if we have it and no messages (or we're opening chat)
-        // This handles both switching and opening chat for the first time
-        // Use ref to check messages length to avoid stale closure issues
-        if (messagesRef.current.length === 0) {
-          console.log('Loading history for agent (no existing messages)');
-          const mostRecentSession = history[history.length - 1];
-          if (mostRecentSession && mostRecentSession.messages.length > 0) {
-            setMessages(mostRecentSession.messages);
-            setCurrentSessionId(mostRecentSession.id);
-          }
-        } else {
-          console.log('History available but messages exist, not overriding');
-        }
       } else {
-        console.log('No history available for this agent');
+        console.log('Messages exist and not switching, keeping current messages');
       }
     });
 
@@ -1946,6 +1857,94 @@ const ChatPanel = forwardRef<ChatPanelRef, ChatPanelProps>(({ isOpen, onClose, s
       }
     });
 
+    // Handle agent history cleared events
+    socket.on('agentHistoryCleared', (data: { agentId: string }) => {
+      // Clear messages if the cleared agent is currently selected
+      if (selectedAgent && selectedAgent.id === data.agentId) {
+        setMessages([]);
+        // Reload sessions list to update UI
+        socket.emit('getAgentSessions', { agentId: data.agentId });
+      }
+    });
+
+    socket.on('allAgentsHistoryCleared', () => {
+      // Always clear messages when all history is cleared
+      setMessages([]);
+      // Reload sessions list if we have a selected agent
+      if (selectedAgent) {
+        socket.emit('getAgentSessions', { agentId: selectedAgent.id });
+      }
+    });
+
+    // Session management listeners
+    socket.on('agentSessions', ({ agentId, sessions, currentSessionId }: { agentId: string; sessions: any[]; currentSessionId: string | null }) => {
+      console.log('agentSessions received for agent:', agentId, 'sessions:', sessions.length, 'current:', currentSessionId);
+      if (selectedAgent && agentId === selectedAgent.id) {
+        setAvailableSessions(sessions);
+        setSelectedSessionId(currentSessionId);
+        
+        // If we have sessions and a current session, load its history
+        if (currentSessionId && sessions.length > 0) {
+          socket.emit('loadSessionHistory', { agentId, sessionId: currentSessionId });
+        } else if (sessions.length === 0) {
+          // No sessions available - clear messages
+          setMessages([]);
+        }
+        
+        // Generate summaries for sessions that don't have one yet
+        sessions.forEach(session => {
+          if (!sessionSummaries.has(session.id) && session.messageCount > 0) {
+            // Request summary generation
+            socket.emit('generateSessionSummary', { agentId, sessionId: session.id });
+          }
+        });
+      }
+    });
+
+    socket.on('sessionHistory', ({ agentId, sessionId, messages: sessionMessages }: { agentId: string; sessionId: string; messages: ChatMessage[] }) => {
+      console.log('sessionHistory received for session:', sessionId, 'messages:', sessionMessages.length);
+      // Update messages if it's for the current agent (don't check selectedSessionId due to state timing)
+      if (selectedAgent && agentId === selectedAgent.id) {
+        console.log('Loading session history into messages:', sessionMessages.length);
+        setMessages(sessionMessages);
+        setSelectedSessionId(sessionId); // Ensure selectedSessionId is in sync
+      }
+    });
+
+    socket.on('currentSessionSet', ({ agentId, sessionId }: { agentId: string; sessionId: string }) => {
+      console.log('currentSessionSet:', sessionId);
+      if (selectedAgent && agentId === selectedAgent.id) {
+        setSelectedSessionId(sessionId);
+        // Load the session history
+        socket.emit('loadSessionHistory', { agentId, sessionId });
+      }
+    });
+
+    socket.on('newSessionCreated', ({ agentId, sessionId }: { agentId: string; sessionId: string }) => {
+      console.log('newSessionCreated:', sessionId);
+      if (selectedAgent && agentId === selectedAgent.id) {
+        // Reload sessions list
+        socket.emit('getAgentSessions', { agentId });
+        // Set as current and clear messages
+        setSelectedSessionId(sessionId);
+        setMessages([]);
+        setCurrentContextUsage(null);
+      }
+    });
+
+    socket.on('sessionSummary', ({ sessionId, summary }: { sessionId: string; summary: string }) => {
+      console.log('sessionSummary received for session:', sessionId);
+      setSessionSummaries(prev => new Map(prev).set(sessionId, summary));
+    });
+
+    socket.on('allAgentSessionsCleared', ({ agentId }: { agentId: string }) => {
+      console.log('allAgentSessionsCleared for agent:', agentId);
+      if (selectedAgent && agentId === selectedAgent.id) {
+        // Reload sessions
+        socket.emit('getAgentSessions', { agentId });
+      }
+    });
+
     return () => {
       socket.off('userSettings');
       socket.off('chatModels');
@@ -1962,6 +1961,14 @@ const ChatPanel = forwardRef<ChatPanelRef, ChatPanelProps>(({ isOpen, onClose, s
       socket.off('agentChatSessionSaved');
       socket.off('tokenUsage');
       socket.off('firstChunkTime');
+      socket.off('agentHistoryCleared');
+      socket.off('allAgentsHistoryCleared');
+      socket.off('agentSessions');
+      socket.off('sessionHistory');
+      socket.off('currentSessionSet');
+      socket.off('newSessionCreated');
+      socket.off('sessionSummary');
+      socket.off('allAgentSessionsCleared');
       // Clean up focus timeout on unmount
       if (focusTimeoutRef.current) {
         clearTimeout(focusTimeoutRef.current);
@@ -2126,16 +2133,6 @@ const ChatPanel = forwardRef<ChatPanelRef, ChatPanelProps>(({ isOpen, onClose, s
       onAgentChatStart(selectedAgent.id, selectedAgent.name);
     }
     
-    // Prepare conversation history (exclude placeholder messages and the current message)
-    // Include recent messages for context - limit to last 20 messages to manage context window
-    const conversationHistory = messages
-      .filter(msg => !msg._isPlaceholder && msg.id !== newMessage.id)
-      .slice(-20) // Last 20 messages for context
-      .map(msg => ({
-        role: msg.type === 'prompt' ? 'user' : 'assistant',
-        content: msg.content
-      }));
-    
     // Log image data for debugging
     if (selectedImage) {
       console.log('[IMAGE] Sending image with request:', {
@@ -2146,35 +2143,37 @@ const ChatPanel = forwardRef<ChatPanelRef, ChatPanelProps>(({ isOpen, onClose, s
     }
     
     // Send to AI via socket
+    // Note: We only send the current message now. The backend will reconstruct
+    // the conversation history from the agent's history file to keep everything in sync.
     socket.emit('sendChatPrompt', {
       requestId,
       prompt: newMessage.content,
-      conversationHistory, // Include conversation history for stateful conversations
+      // conversationHistory removed - backend now loads history from file
       model: selectedAgent.model,
       thinkingTokens,
-      projectPath: selectedAgent?.enabledAttributes?.includes('Project Path') ? getProjectPathFromContext(selectedContext) : null,
+      projectPath: getProjectPathFromContext(selectedContext),
       containerId: selectedContext?.type === 'container' ? selectedContext.id : null,
       agentId: selectedAgent?.id,
       requestedTools: selectedTools, // Tools selected by user for this conversation
-      agentName: selectedAgent?.enabledAttributes?.includes('Agent Name') ? selectedAgent.name : null,
-      agentNickname: selectedAgent?.enabledAttributes?.includes('Agent Nickname') ? selectedAgent.nickname : null,
-      agentJobTitle: selectedAgent?.enabledAttributes?.includes('Agent Job Title') ? selectedAgent.jobTitle : null,
-      userName: selectedAgent?.enabledAttributes?.includes('User Name') && userSettings.allowUseGitName ? userProfile?.name : null,
-      userEmail: selectedAgent?.enabledAttributes?.includes('User Email') && userSettings.allowUseGitEmail ? userProfile?.email : null,
-      userNickname: selectedAgent?.enabledAttributes?.includes('User Nickname') && userSettings.nickname ? userSettings.nickname : null,
-      userLanguage: selectedAgent?.enabledAttributes?.includes('User Language') && userSettings.language ? userSettings.language : null,
-      userAge: selectedAgent?.enabledAttributes?.includes('User Age') && userSettings.age ? userSettings.age : null,
-      userGender: selectedAgent?.enabledAttributes?.includes('User Gender Identity') && userSettings.gender ? userSettings.gender : null,
-      userOrientation: selectedAgent?.enabledAttributes?.includes('User Gender Orientation') && userSettings.orientation ? userSettings.orientation : null,
-      userJobTitle: selectedAgent?.enabledAttributes?.includes('User Job Title') && userSettings.jobTitle ? userSettings.jobTitle : null,
-      userEmployer: selectedAgent?.enabledAttributes?.includes('User Employer') && userSettings.employer ? userSettings.employer : null,
-      userEducationLevel: selectedAgent?.enabledAttributes?.includes('User Education Level') && userSettings.educationLevel ? userSettings.educationLevel : null,
-      userPoliticalIdeology: selectedAgent?.enabledAttributes?.includes('User Political Ideology') && userSettings.politicalIdeology ? userSettings.politicalIdeology : null,
-      userReligion: selectedAgent?.enabledAttributes?.includes('User Religion') && userSettings.religion ? userSettings.religion : null,
-      userInterests: selectedAgent?.enabledAttributes?.includes('User Interests') && userSettings.interests ? userSettings.interests : null,
-      userCountry: selectedAgent?.enabledAttributes?.includes('User Country') && userSettings.country ? userSettings.country : null,
-      userState: selectedAgent?.enabledAttributes?.includes('User State') && userSettings.state ? userSettings.state : null,
-      userZipcode: selectedAgent?.enabledAttributes?.includes('User Zipcode') && userSettings.zipcode ? userSettings.zipcode : null,
+      agentName: selectedAgent.name || null,
+      agentNickname: selectedAgent.nickname || null,
+      agentJobTitle: selectedAgent.jobTitle || null,
+      userName: userSettings.allowUseGitName ? userProfile?.name : null,
+      userEmail: userSettings.allowUseGitEmail ? userProfile?.email : null,
+      userNickname: userSettings.nickname || null,
+      userLanguage: userSettings.language || null,
+      userAge: userSettings.age || null,
+      userGender: userSettings.gender || null,
+      userOrientation: userSettings.orientation || null,
+      userJobTitle: userSettings.jobTitle || null,
+      userEmployer: userSettings.employer || null,
+      userEducationLevel: userSettings.educationLevel || null,
+      userPoliticalIdeology: userSettings.politicalIdeology || null,
+      userReligion: userSettings.religion || null,
+      userInterests: userSettings.interests || null,
+      userCountry: userSettings.country || null,
+      userState: userSettings.state || null,
+      userZipcode: userSettings.zipcode || null,
       image: selectedImage ? {
         data: selectedImage.data,
         mediaType: selectedImage.mediaType
@@ -2270,7 +2269,7 @@ const ChatPanel = forwardRef<ChatPanelRef, ChatPanelProps>(({ isOpen, onClose, s
         <div className="chat-header">
           <div className="flex items-center space-x-3 flex-1">
             {selectedAgent ? (
-              <div className="flex items-center space-x-2">
+              <div className="flex items-center space-x-2 flex-1">
                 <div className="w-8 h-8 rounded-full bg-gray-700 flex items-center justify-center overflow-hidden flex-shrink-0">
                   {selectedAgent.avatar ? (
                     <img src={selectedAgent.avatar} alt={selectedAgent.name} className="w-full h-full object-cover" />
@@ -2283,6 +2282,52 @@ const ChatPanel = forwardRef<ChatPanelRef, ChatPanelProps>(({ isOpen, onClose, s
                   {selectedAgent.jobTitle && (
                     <span className="text-xs text-gray-400">{selectedAgent.jobTitle}</span>
                   )}
+                </div>
+                
+                {/* Session selector */}
+                <div className="flex items-center space-x-2 ml-4">
+                  <select
+                    value={selectedSessionId || ''}
+                    onChange={(e) => {
+                      const newSessionId = e.target.value;
+                      if (newSessionId && selectedAgent) {
+                        socket.emit('setCurrentSession', { agentId: selectedAgent.id, sessionId: newSessionId });
+                      }
+                    }}
+                    disabled={availableSessions.length === 0}
+                    className={`bg-gray-700 text-gray-200 text-xs rounded px-2 py-1 border border-gray-600 focus:outline-none focus:border-blue-500 ${
+                      availableSessions.length === 0 ? 'opacity-50 cursor-not-allowed' : ''
+                    }`}
+                    style={{ minWidth: '150px', maxWidth: '200px' }}
+                  >
+                    {availableSessions.length === 0 ? (
+                      <option value="">No sessions yet</option>
+                    ) : (
+                      availableSessions.map(session => {
+                        const summary = sessionSummaries.get(session.id);
+                        const label = summary || `Session (${session.messageCount} messages)`;
+                        const truncatedLabel = label.length > 30 ? label.substring(0, 27) + '...' : label;
+                        return (
+                          <option key={session.id} value={session.id}>
+                            {truncatedLabel}
+                          </option>
+                        );
+                      })
+                    )}
+                  </select>
+                  
+                  <button
+                    onClick={() => {
+                      if (selectedAgent) {
+                        socket.emit('createNewSession', { agentId: selectedAgent.id });
+                      }
+                    }}
+                    className="bg-blue-600 hover:bg-blue-700 text-white text-xs rounded px-2 py-1 flex items-center space-x-1"
+                    title="New Session"
+                  >
+                    <span>+</span>
+                    <span>New</span>
+                  </button>
                 </div>
               </div>
             ) : (

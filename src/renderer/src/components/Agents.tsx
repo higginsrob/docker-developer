@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import io from 'socket.io-client';
 import ViewToggle from './ViewToggle';
-import { PencilIcon, TrashIcon, MagnifyingGlassIcon } from '@heroicons/react/24/outline';
+import { PencilIcon, TrashIcon, MagnifyingGlassIcon, ChatBubbleLeftRightIcon } from '@heroicons/react/24/outline';
 
 const socket = io('http://localhost:3002');
 
@@ -13,7 +13,18 @@ export interface Agent {
   avatar?: string; // Base64 encoded image or URL
   model: string;
   contextSize: number;
-  enabledAttributes?: string[]; // Available attributes like 'Project Path'
+  // Executable parameters (merged from AI Executables)
+  maxTokens?: number;
+  temperature?: number;
+  topP?: number;
+  topK?: number;
+  mcpServers?: string;
+  tools?: string;
+  toolChoice?: string;
+  toolMode?: string;
+  responseFormat?: string;
+  debugMode?: boolean;
+  sessionCount?: number; // Number of sessions
   createdAt: Date;
   lastUsed?: Date;
 }
@@ -38,7 +49,16 @@ const Agents: React.FC<AgentsProps> = ({ onAgentSelect, selectedAgent }) => {
     jobTitle: '',
     model: '',
     contextSize: 8192,
-    enabledAttributes: [],
+    maxTokens: 2048,
+    temperature: 0.7,
+    topP: 0.9,
+    topK: 40,
+    mcpServers: '',
+    tools: '',
+    toolChoice: 'auto',
+    toolMode: 'prompt',
+    responseFormat: 'text',
+    debugMode: false,
   });
 
   // Use refs to track current state for socket handlers
@@ -113,11 +133,23 @@ const Agents: React.FC<AgentsProps> = ({ onAgentSelect, selectedAgent }) => {
       setIsSaving(false);
     });
 
+    socket.on('agentHistoryCleared', () => {
+      // Refresh agents list to update history counts
+      socket.emit('getAgents');
+    });
+
+    socket.on('allAgentsHistoryCleared', () => {
+      // Refresh agents list to update history counts
+      socket.emit('getAgents');
+    });
+
     return () => {
       socket.off('agents');
       socket.off('chatModels');
       socket.off('mcpServers');
       socket.off('agentError');
+      socket.off('agentHistoryCleared');
+      socket.off('allAgentsHistoryCleared');
     };
   }, [isSaving, formData.model]);
 
@@ -130,7 +162,16 @@ const Agents: React.FC<AgentsProps> = ({ onAgentSelect, selectedAgent }) => {
       jobTitle: '',
       model: models[0]?.id || '',
       contextSize: 8192,
-      enabledAttributes: ['Agent Name', 'Agent Nickname', 'Agent Job Title', 'User Name'], // Default enabled attributes
+      maxTokens: 2048,
+      temperature: 0.7,
+      topP: 0.9,
+      topK: 40,
+      mcpServers: '',
+      tools: '',
+      toolChoice: 'auto',
+      toolMode: 'prompt',
+      responseFormat: 'text',
+      debugMode: false,
     });
     // Request models if not already loaded
     if (models.length === 0) {
@@ -148,7 +189,16 @@ const Agents: React.FC<AgentsProps> = ({ onAgentSelect, selectedAgent }) => {
       avatar: agent.avatar,
       model: agent.model,
       contextSize: agent.contextSize,
-      enabledAttributes: agent.enabledAttributes || [],
+      maxTokens: agent.maxTokens || 2048,
+      temperature: agent.temperature || 0.7,
+      topP: agent.topP || 0.9,
+      topK: agent.topK || 40,
+      mcpServers: agent.mcpServers || '',
+      tools: agent.tools || '',
+      toolChoice: agent.toolChoice || 'auto',
+      toolMode: agent.toolMode || 'prompt',
+      responseFormat: agent.responseFormat || 'text',
+      debugMode: agent.debugMode || false,
     });
     // Request models if not already loaded
     if (models.length === 0) {
@@ -159,6 +209,18 @@ const Agents: React.FC<AgentsProps> = ({ onAgentSelect, selectedAgent }) => {
   const handleDeleteAgent = (agentId: string) => {
     if (window.confirm('Are you sure you want to delete this agent?')) {
       socket.emit('deleteAgent', agentId);
+    }
+  };
+
+  const handleClearAllAgentSessions = (agentId: string, agentName: string) => {
+    if (window.confirm(`Are you sure you want to clear ALL sessions for ${agentName}? This cannot be undone.`)) {
+      socket.emit('clearAllAgentSessions', { agentId });
+    }
+  };
+
+  const handleClearAllHistory = () => {
+    if (window.confirm('Are you sure you want to clear ALL sessions for ALL agents? This cannot be undone.')) {
+      socket.emit('clearAllAgentsHistory');
     }
   };
 
@@ -178,7 +240,16 @@ const Agents: React.FC<AgentsProps> = ({ onAgentSelect, selectedAgent }) => {
       avatar: formData.avatar,
       model: formData.model,
       contextSize: formData.contextSize || 8192,
-      enabledAttributes: formData.enabledAttributes || [],
+      maxTokens: formData.maxTokens || 2048,
+      temperature: formData.temperature || 0.7,
+      topP: formData.topP || 0.9,
+      topK: formData.topK || 40,
+      mcpServers: formData.mcpServers || '',
+      tools: formData.tools || '',
+      toolChoice: formData.toolChoice || 'auto',
+      toolMode: formData.toolMode || 'prompt',
+      responseFormat: formData.responseFormat || 'text',
+      debugMode: formData.debugMode || false,
       createdAt: editingAgent?.createdAt || new Date(),
       lastUsed: editingAgent?.lastUsed,
     };
@@ -222,18 +293,6 @@ const Agents: React.FC<AgentsProps> = ({ onAgentSelect, selectedAgent }) => {
     }
   };
 
-  const toggleAttribute = (attribute: string) => {
-    setFormData(prev => {
-      const enabledAttributes = prev.enabledAttributes || [];
-      const isEnabled = enabledAttributes.includes(attribute);
-      return {
-        ...prev,
-        enabledAttributes: isEnabled
-          ? enabledAttributes.filter(a => a !== attribute)
-          : [...enabledAttributes, attribute],
-      };
-    });
-  };
 
   // Filter agents
   const filteredAgents = useMemo(() => {
@@ -245,6 +304,11 @@ const Agents: React.FC<AgentsProps> = ({ onAgentSelect, selectedAgent }) => {
       agent.model.toLowerCase().includes(filter.toLowerCase())
     );
   }, [agents, filter]);
+
+  // Check if all agents have no sessions (to disable "Clear All History" button)
+  const allSessionsEmpty = useMemo(() => {
+    return agents.length === 0 || agents.every(agent => (agent.sessionCount || 0) === 0);
+  }, [agents]);
 
   if (isCreating) {
     return (
@@ -372,221 +436,148 @@ const Agents: React.FC<AgentsProps> = ({ onAgentSelect, selectedAgent }) => {
               </div>
             </div>
 
-            {/* Available Attributes */}
-            <div>
-              <label className="block text-sm font-medium text-gray-200 mb-2">
-                Available Attributes
-              </label>
-              <div className="border border-gray-600 rounded-lg p-4 space-y-2 bg-gray-700">
-                <div className="flex items-center space-x-3 py-2">
+            {/* Terminal Executable Configuration */}
+            <div className="border-t border-gray-700 pt-6 mt-6">
+              <h4 className="text-lg font-semibold text-gray-200 mb-1">Terminal Executable Configuration</h4>
+              <p className="text-sm text-gray-400 mb-4">
+                These settings configure the terminal-based executable for this agent and will be used when calling the agent from the command line.
+              </p>
+              
+              <div className="space-y-4">
+                {/* Max Tokens */}
+                <div>
+                  <label className="block text-sm font-medium text-gray-200 mb-2">
+                    Max Tokens
+                    <span className="text-gray-400 font-normal ml-2">(output limit)</span>
+                  </label>
                   <input
-                    type="checkbox"
-                    checked={formData.enabledAttributes?.includes('Project Path') || false}
-                    onChange={() => toggleAttribute('Project Path')}
-                    className="w-4 h-4 text-blue-600 rounded focus:ring-2 focus:ring-blue-500"
+                    type="number"
+                    value={formData.maxTokens}
+                    onChange={(e) => setFormData(prev => ({ ...prev, maxTokens: parseInt(e.target.value) }))}
+                    min="1"
+                    max="32000"
+                    className="w-full px-4 py-2 border border-gray-600 rounded-lg bg-gray-700 text-gray-200 placeholder-gray-500 focus:ring-2 focus:ring-blue-500 focus:border-transparent"
                   />
-                  <span className="text-sm text-gray-200">Project Path</span>
-                  <span className="text-xs text-gray-400">(Include selected project path in prompts)</span>
                 </div>
-                <div className="flex items-center space-x-3 py-2">
-                  <input
-                    type="checkbox"
-                    checked={formData.enabledAttributes?.includes('Agent Name') || false}
-                    onChange={() => toggleAttribute('Agent Name')}
-                    className="w-4 h-4 text-blue-600 rounded focus:ring-2 focus:ring-blue-500"
-                  />
-                  <span className="text-sm text-gray-200">Agent Name</span>
-                  <span className="text-xs text-gray-400">(Inform agent of their name)</span>
+
+                {/* Temperature, Top P, Top K in a grid */}
+                <div className="grid grid-cols-3 gap-4">
+                  <div>
+                    <label className="block text-sm font-medium text-gray-200 mb-2">
+                      Temperature
+                      <span className="text-gray-400 font-normal ml-2 text-xs">(0-2)</span>
+                    </label>
+                    <input
+                      type="number"
+                      step="0.1"
+                      value={formData.temperature}
+                      onChange={(e) => setFormData(prev => ({ ...prev, temperature: parseFloat(e.target.value) }))}
+                      min="0"
+                      max="2"
+                      className="w-full px-4 py-2 border border-gray-600 rounded-lg bg-gray-700 text-gray-200 placeholder-gray-500 focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                    />
+                  </div>
+                  
+                  <div>
+                    <label className="block text-sm font-medium text-gray-200 mb-2">
+                      Top P
+                      <span className="text-gray-400 font-normal ml-2 text-xs">(0-1)</span>
+                    </label>
+                    <input
+                      type="number"
+                      step="0.1"
+                      value={formData.topP}
+                      onChange={(e) => setFormData(prev => ({ ...prev, topP: parseFloat(e.target.value) }))}
+                      min="0"
+                      max="1"
+                      className="w-full px-4 py-2 border border-gray-600 rounded-lg bg-gray-700 text-gray-200 placeholder-gray-500 focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                    />
+                  </div>
+                  
+                  <div>
+                    <label className="block text-sm font-medium text-gray-200 mb-2">
+                      Top K
+                      <span className="text-gray-400 font-normal ml-2 text-xs">(sampling)</span>
+                    </label>
+                    <input
+                      type="number"
+                      value={formData.topK}
+                      onChange={(e) => setFormData(prev => ({ ...prev, topK: parseInt(e.target.value) }))}
+                      min="1"
+                      max="100"
+                      className="w-full px-4 py-2 border border-gray-600 rounded-lg bg-gray-700 text-gray-200 placeholder-gray-500 focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                    />
+                  </div>
                 </div>
-                <div className="flex items-center space-x-3 py-2">
-                  <input
-                    type="checkbox"
-                    checked={formData.enabledAttributes?.includes('Agent Nickname') || false}
-                    onChange={() => toggleAttribute('Agent Nickname')}
-                    className="w-4 h-4 text-blue-600 rounded focus:ring-2 focus:ring-blue-500"
-                  />
-                  <span className="text-sm text-gray-200">Agent Nickname</span>
-                  <span className="text-xs text-gray-400">(Inform agent of their nickname)</span>
+
+                {/* Tool Choice and Tool Mode */}
+                <div className="grid grid-cols-2 gap-4">
+                  <div>
+                    <label className="block text-sm font-medium text-gray-200 mb-2">
+                      Tool Choice
+                    </label>
+                    <select
+                      value={formData.toolChoice}
+                      onChange={(e) => setFormData(prev => ({ ...prev, toolChoice: e.target.value }))}
+                      className="w-full px-4 py-2 border border-gray-600 rounded-lg bg-gray-700 text-gray-200 focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                    >
+                      <option value="auto">Auto</option>
+                      <option value="required">Required</option>
+                      <option value="none">None</option>
+                    </select>
+                  </div>
+                  
+                  <div>
+                    <label className="block text-sm font-medium text-gray-200 mb-2">
+                      Tool Mode
+                    </label>
+                    <select
+                      value={formData.toolMode}
+                      onChange={(e) => setFormData(prev => ({ ...prev, toolMode: e.target.value }))}
+                      className="w-full px-4 py-2 border border-gray-600 rounded-lg bg-gray-700 text-gray-200 focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                      title="Prompt: Compatible with all models. Native: Faster but requires server support."
+                    >
+                      <option value="prompt">Prompt-Based (Recommended)</option>
+                      <option value="native">Native (Faster, if supported)</option>
+                    </select>
+                  </div>
                 </div>
-                <div className="flex items-center space-x-3 py-2">
-                  <input
-                    type="checkbox"
-                    checked={formData.enabledAttributes?.includes('Agent Job Title') || false}
-                    onChange={() => toggleAttribute('Agent Job Title')}
-                    className="w-4 h-4 text-blue-600 rounded focus:ring-2 focus:ring-blue-500"
-                  />
-                  <span className="text-sm text-gray-200">Agent Job Title</span>
-                  <span className="text-xs text-gray-400">(Inform agent of their job title)</span>
+
+                {/* Response Format */}
+                <div>
+                  <label className="block text-sm font-medium text-gray-200 mb-2">
+                    Response Format
+                  </label>
+                  <select
+                    value={formData.responseFormat}
+                    onChange={(e) => setFormData(prev => ({ ...prev, responseFormat: e.target.value }))}
+                    className="w-full px-4 py-2 border border-gray-600 rounded-lg bg-gray-700 text-gray-200 focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                  >
+                    <option value="text">Text</option>
+                    <option value="json">JSON</option>
+                    <option value="json_object">JSON Object</option>
+                  </select>
                 </div>
-                <div className="flex items-center space-x-3 py-2">
+
+                {/* Debug Mode Checkbox */}
+                <div className="flex items-center space-x-3">
                   <input
                     type="checkbox"
-                    checked={formData.enabledAttributes?.includes('User Name') || false}
-                    onChange={() => toggleAttribute('User Name')}
+                    checked={formData.debugMode || false}
+                    onChange={(e) => setFormData(prev => ({ ...prev, debugMode: e.target.checked }))}
                     className="w-4 h-4 text-blue-600 rounded focus:ring-2 focus:ring-blue-500"
                   />
-                  <span className="text-sm text-gray-200">User Name</span>
-                  <span className="text-xs text-gray-400">(Include user's git name in prompts)</span>
+                  <label className="text-sm font-medium text-gray-200">
+                    Debug Mode
+                    <span className="text-gray-400 font-normal ml-2">(show detailed execution info)</span>
+                  </label>
                 </div>
-                <div className="flex items-center space-x-3 py-2">
-                  <input
-                    type="checkbox"
-                    checked={formData.enabledAttributes?.includes('User Email') || false}
-                    onChange={() => toggleAttribute('User Email')}
-                    className="w-4 h-4 text-blue-600 rounded focus:ring-2 focus:ring-blue-500"
-                  />
-                  <span className="text-sm text-gray-200">User Email</span>
-                  <span className="text-xs text-gray-400">(Include user's git email in prompts)</span>
-                </div>
-                <div className="flex items-center space-x-3 py-2">
-                  <input
-                    type="checkbox"
-                    checked={formData.enabledAttributes?.includes('User Country') || false}
-                    onChange={() => toggleAttribute('User Country')}
-                    className="w-4 h-4 text-blue-600 rounded focus:ring-2 focus:ring-blue-500"
-                  />
-                  <span className="text-sm text-gray-200">User Country</span>
-                  <span className="text-xs text-gray-400">(Include user's country in prompts)</span>
-                </div>
-                <div className="flex items-center space-x-3 py-2">
-                  <input
-                    type="checkbox"
-                    checked={formData.enabledAttributes?.includes('User State') || false}
-                    onChange={() => toggleAttribute('User State')}
-                    className="w-4 h-4 text-blue-600 rounded focus:ring-2 focus:ring-blue-500"
-                  />
-                  <span className="text-sm text-gray-200">User State</span>
-                  <span className="text-xs text-gray-400">(Include user's state in prompts)</span>
-                </div>
-                <div className="flex items-center space-x-3 py-2">
-                  <input
-                    type="checkbox"
-                    checked={formData.enabledAttributes?.includes('User Zipcode') || false}
-                    onChange={() => toggleAttribute('User Zipcode')}
-                    className="w-4 h-4 text-blue-600 rounded focus:ring-2 focus:ring-blue-500"
-                  />
-                  <span className="text-sm text-gray-200">User Zipcode</span>
-                  <span className="text-xs text-gray-400">(Include user's zipcode in prompts)</span>
-                </div>
-                <div className="flex items-center space-x-3 py-2">
-                  <input
-                    type="checkbox"
-                    checked={formData.enabledAttributes?.includes('User Nickname') || false}
-                    onChange={() => toggleAttribute('User Nickname')}
-                    className="w-4 h-4 text-blue-600 rounded focus:ring-2 focus:ring-blue-500"
-                  />
-                  <span className="text-sm text-gray-200">User Nickname</span>
-                  <span className="text-xs text-gray-400">(Include user's nickname in prompts)</span>
-                </div>
-                <div className="flex items-center space-x-3 py-2">
-                  <input
-                    type="checkbox"
-                    checked={formData.enabledAttributes?.includes('User Language') || false}
-                    onChange={() => toggleAttribute('User Language')}
-                    className="w-4 h-4 text-blue-600 rounded focus:ring-2 focus:ring-blue-500"
-                  />
-                  <span className="text-sm text-gray-200">User Language</span>
-                  <span className="text-xs text-gray-400">(Include user's language in prompts)</span>
-                </div>
-                <div className="flex items-center space-x-3 py-2">
-                  <input
-                    type="checkbox"
-                    checked={formData.enabledAttributes?.includes('User Age') || false}
-                    onChange={() => toggleAttribute('User Age')}
-                    className="w-4 h-4 text-blue-600 rounded focus:ring-2 focus:ring-blue-500"
-                  />
-                  <span className="text-sm text-gray-200">User Age</span>
-                  <span className="text-xs text-gray-400">(Include user's age in prompts)</span>
-                </div>
-                <div className="flex items-center space-x-3 py-2">
-                  <input
-                    type="checkbox"
-                    checked={formData.enabledAttributes?.includes('User Gender Identity') || false}
-                    onChange={() => toggleAttribute('User Gender Identity')}
-                    className="w-4 h-4 text-blue-600 rounded focus:ring-2 focus:ring-blue-500"
-                  />
-                  <span className="text-sm text-gray-200">User Gender Identity</span>
-                  <span className="text-xs text-gray-400">(Include user's gender identity in prompts)</span>
-                </div>
-                <div className="flex items-center space-x-3 py-2">
-                  <input
-                    type="checkbox"
-                    checked={formData.enabledAttributes?.includes('User Gender Orientation') || false}
-                    onChange={() => toggleAttribute('User Gender Orientation')}
-                    className="w-4 h-4 text-blue-600 rounded focus:ring-2 focus:ring-blue-500"
-                  />
-                  <span className="text-sm text-gray-200">User Gender Orientation</span>
-                  <span className="text-xs text-gray-400">(Include user's gender orientation in prompts)</span>
-                </div>
-                <div className="flex items-center space-x-3 py-2">
-                  <input
-                    type="checkbox"
-                    checked={formData.enabledAttributes?.includes('User Job Title') || false}
-                    onChange={() => toggleAttribute('User Job Title')}
-                    className="w-4 h-4 text-blue-600 rounded focus:ring-2 focus:ring-blue-500"
-                  />
-                  <span className="text-sm text-gray-200">User Job Title</span>
-                  <span className="text-xs text-gray-400">(Include user's job title in prompts)</span>
-                </div>
-                <div className="flex items-center space-x-3 py-2">
-                  <input
-                    type="checkbox"
-                    checked={formData.enabledAttributes?.includes('User Employer') || false}
-                    onChange={() => toggleAttribute('User Employer')}
-                    className="w-4 h-4 text-blue-600 rounded focus:ring-2 focus:ring-blue-500"
-                  />
-                  <span className="text-sm text-gray-200">User Employer</span>
-                  <span className="text-xs text-gray-400">(Include user's employer in prompts)</span>
-                </div>
-                <div className="flex items-center space-x-3 py-2">
-                  <input
-                    type="checkbox"
-                    checked={formData.enabledAttributes?.includes('User Education Level') || false}
-                    onChange={() => toggleAttribute('User Education Level')}
-                    className="w-4 h-4 text-blue-600 rounded focus:ring-2 focus:ring-blue-500"
-                  />
-                  <span className="text-sm text-gray-200">User Education Level</span>
-                  <span className="text-xs text-gray-400">(Include user's education level in prompts)</span>
-                </div>
-                <div className="flex items-center space-x-3 py-2">
-                  <input
-                    type="checkbox"
-                    checked={formData.enabledAttributes?.includes('User Political Ideology') || false}
-                    onChange={() => toggleAttribute('User Political Ideology')}
-                    className="w-4 h-4 text-blue-600 rounded focus:ring-2 focus:ring-blue-500"
-                  />
-                  <span className="text-sm text-gray-200">User Political Ideology</span>
-                  <span className="text-xs text-gray-400">(Include user's political ideology in prompts)</span>
-                </div>
-                <div className="flex items-center space-x-3 py-2">
-                  <input
-                    type="checkbox"
-                    checked={formData.enabledAttributes?.includes('User Religion') || false}
-                    onChange={() => toggleAttribute('User Religion')}
-                    className="w-4 h-4 text-blue-600 rounded focus:ring-2 focus:ring-blue-500"
-                  />
-                  <span className="text-sm text-gray-200">User Religion</span>
-                  <span className="text-xs text-gray-400">(Include user's religion in prompts)</span>
-                </div>
-                <div className="flex items-center space-x-3 py-2">
-                  <input
-                    type="checkbox"
-                    checked={formData.enabledAttributes?.includes('User Interests') || false}
-                    onChange={() => toggleAttribute('User Interests')}
-                    className="w-4 h-4 text-blue-600 rounded focus:ring-2 focus:ring-blue-500"
-                  />
-                  <span className="text-sm text-gray-200">User Interests</span>
-                  <span className="text-xs text-gray-400">(Include user's interests in prompts)</span>
-                </div>
-                <div className="flex items-center space-x-3 py-2">
-                  <input
-                    type="checkbox"
-                    checked={formData.enabledAttributes?.includes('GitHub Repo') || false}
-                    onChange={() => toggleAttribute('GitHub Repo')}
-                    className="w-4 h-4 text-blue-600 rounded focus:ring-2 focus:ring-blue-500"
-                  />
-                  <span className="text-sm text-gray-200">GitHub Repo</span>
-                  <span className="text-xs text-gray-400">(Include GitHub repository information in prompts)</span>
+
+                <div className="bg-blue-900/20 border border-blue-700 rounded-lg p-3 mt-4">
+                  <p className="text-sm text-blue-200">
+                    ℹ️ <strong>Note:</strong> All user attributes from your User Settings will be automatically included in prompts for this agent.
+                    The terminal executable will also be generated with these configurations.
+                  </p>
                 </div>
               </div>
             </div>
@@ -631,6 +622,19 @@ const Agents: React.FC<AgentsProps> = ({ onAgentSelect, selectedAgent }) => {
           </div>
           <div className="flex items-center space-x-3">
             <ViewToggle viewMode={viewMode} onViewModeChange={handleViewModeChange} />
+            <button
+              onClick={handleClearAllHistory}
+              disabled={allSessionsEmpty}
+              className={`px-4 py-3 rounded-lg font-medium transition-colors shadow-lg flex items-center space-x-2 ${
+                allSessionsEmpty
+                  ? 'bg-gray-600 text-gray-400 cursor-not-allowed'
+                  : 'bg-orange-600 text-white hover:bg-orange-700'
+              }`}
+              title={allSessionsEmpty ? 'No sessions to clear' : 'Clear all sessions for all agents'}
+            >
+              <ChatBubbleLeftRightIcon className="w-5 h-5" />
+              <span>Clear All Sessions</span>
+            </button>
             <button
               onClick={handleCreateAgent}
               className="bg-blue-600 text-white px-6 py-3 rounded-lg hover:bg-blue-700 font-medium transition-colors shadow-lg flex items-center space-x-2"
@@ -716,29 +720,56 @@ const Agents: React.FC<AgentsProps> = ({ onAgentSelect, selectedAgent }) => {
                   <span className="text-gray-200">{agent.contextSize.toLocaleString()}</span>
                 </div>
                 <div className="flex items-center justify-between">
-                  <span className="font-medium">Attributes:</span>
-                  <span className="text-gray-200">{agent.enabledAttributes?.length || 0}</span>
+                  <span className="font-medium">Temperature:</span>
+                  <span className="text-gray-200">{agent.temperature || 0.7}</span>
+                </div>
+                <div className="flex items-center justify-between">
+                  <span className="font-medium">Tool Mode:</span>
+                  <span className="text-gray-200">{agent.toolMode || 'prompt'}</span>
+                </div>
+                <div className="flex items-center justify-between">
+                  <span className="font-medium">Sessions:</span>
+                  <span className={`${(agent.sessionCount || 0) === 0 ? 'text-gray-500' : 'text-blue-400'}`}>
+                    {agent.sessionCount || 0} session{(agent.sessionCount || 0) !== 1 ? 's' : ''}
+                  </span>
                 </div>
               </div>
 
-              <div className="mt-6 flex space-x-2">
+              <div className="mt-6 space-y-2">
+                <div className="flex space-x-2">
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      handleEditAgent(agent);
+                    }}
+                    className="flex-1 bg-blue-600 text-white py-2 rounded-lg hover:bg-blue-700 font-medium transition-colors text-sm"
+                  >
+                    Edit
+                  </button>
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      handleDeleteAgent(agent.id);
+                    }}
+                    className="flex-1 bg-red-600 text-white py-2 rounded-lg hover:bg-red-700 font-medium transition-colors text-sm"
+                  >
+                    Delete
+                  </button>
+                </div>
                 <button
                   onClick={(e) => {
                     e.stopPropagation();
-                    handleEditAgent(agent);
+                    handleClearAllAgentSessions(agent.id, agent.name);
                   }}
-                  className="flex-1 bg-blue-600 text-white py-2 rounded-lg hover:bg-blue-700 font-medium transition-colors text-sm"
+                  disabled={(agent.sessionCount || 0) === 0}
+                  className={`w-full py-2 rounded-lg font-medium transition-colors text-sm ${
+                    (agent.sessionCount || 0) === 0
+                      ? 'bg-gray-600 text-gray-400 cursor-not-allowed'
+                      : 'bg-orange-600 text-white hover:bg-orange-700'
+                  }`}
+                  title={(agent.sessionCount || 0) === 0 ? 'No sessions to clear' : 'Clear all sessions for this agent'}
                 >
-                  Edit
-                </button>
-                <button
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    handleDeleteAgent(agent.id);
-                  }}
-                  className="flex-1 bg-red-600 text-white py-2 rounded-lg hover:bg-red-700 font-medium transition-colors text-sm"
-                >
-                  Delete
+                  Clear Sessions
                 </button>
               </div>
             </div>
@@ -764,7 +795,10 @@ const Agents: React.FC<AgentsProps> = ({ onAgentSelect, selectedAgent }) => {
                     Context
                   </th>
                   <th className="px-6 py-4 text-left text-xs font-semibold text-gray-300 uppercase tracking-wider">
-                    Attributes
+                    Temp
+                  </th>
+                  <th className="px-6 py-4 text-left text-xs font-semibold text-gray-300 uppercase tracking-wider">
+                    Sessions
                   </th>
                   <th className="px-6 py-4 text-left text-xs font-semibold text-gray-300 uppercase tracking-wider">
                     Actions
@@ -811,10 +845,15 @@ const Agents: React.FC<AgentsProps> = ({ onAgentSelect, selectedAgent }) => {
                       <span className="text-sm text-gray-200">{agent.contextSize.toLocaleString()}</span>
                     </td>
                     <td className="px-6 py-4">
-                      <span className="text-sm text-gray-200">{agent.enabledAttributes?.length || 0}</span>
+                      <span className="text-sm text-gray-200">{agent.temperature || 0.7}</span>
                     </td>
                     <td className="px-6 py-4">
-                      <div className="flex items-center space-x-2">
+                      <span className={`text-sm ${(agent.sessionCount || 0) === 0 ? 'text-gray-500' : 'text-blue-400 font-medium'}`}>
+                        {agent.sessionCount || 0} session{(agent.sessionCount || 0) !== 1 ? 's' : ''}
+                      </span>
+                    </td>
+                    <td className="px-6 py-4">
+                      <div className="flex items-center space-x-2 flex-wrap">
                         <button
                           onClick={(e) => {
                             e.stopPropagation();
@@ -824,6 +863,22 @@ const Agents: React.FC<AgentsProps> = ({ onAgentSelect, selectedAgent }) => {
                         >
                           <PencilIcon className="w-4 h-4" />
                           <span>Edit</span>
+                        </button>
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleClearAllAgentSessions(agent.id, agent.name);
+                          }}
+                          disabled={(agent.sessionCount || 0) === 0}
+                          className={`px-3 py-1.5 rounded-md text-sm font-medium transition-colors flex items-center space-x-1 ${
+                            (agent.sessionCount || 0) === 0
+                              ? 'bg-gray-600 text-gray-400 cursor-not-allowed'
+                              : 'bg-orange-600 hover:bg-orange-700 text-white'
+                          }`}
+                          title={(agent.sessionCount || 0) === 0 ? 'No sessions to clear' : 'Clear all sessions for this agent'}
+                        >
+                          <ChatBubbleLeftRightIcon className="w-4 h-4" />
+                          <span>Clear</span>
                         </button>
                         <button
                           onClick={(e) => {

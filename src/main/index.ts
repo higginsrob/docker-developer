@@ -8,9 +8,132 @@ import simpleGit from 'simple-git';
 import { MCPClient } from './mcp-client';
 import { RAGService } from './rag-service';
 import * as pty from 'node-pty';
+import * as os from 'os';
+import { randomUUID } from 'crypto';
 
 let devServerProcess: ChildProcess | null = null;
 let mainWindow: BrowserWindow | null = null;
+
+// ============================================================================
+// CENTRALIZED DATA DIRECTORY CONFIGURATION
+// All persistent data is stored in ~/.docker-developer/
+// ============================================================================
+
+/**
+ * Get the base data directory for all persistent storage
+ * @returns Absolute path to ~/.docker-developer/
+ */
+function getDataDirectory(): string {
+  return path.join(os.homedir(), '.docker-developer');
+}
+
+/**
+ * Ensure data directory exists and migrate old data if needed
+ */
+function initializeDataDirectory(): void {
+  const dataDir = getDataDirectory();
+  const oldUserDataDir = app.getPath('userData');
+  
+  // Create base directory and subdirectories
+  const subdirs = ['history', 'mcp', 'cache', 'agents', 'bin'];
+  subdirs.forEach(subdir => {
+    const dirPath = path.join(dataDir, subdir);
+    if (!fs.existsSync(dirPath)) {
+      fs.mkdirSync(dirPath, { recursive: true });
+    }
+  });
+  
+  // Migrate data from old userData location to new unified location
+  // Only run migration if old userData exists and new location doesn't have the file
+  const filesToMigrate = [
+    'window-state.json',
+    'editor-settings.json',
+    'user-settings.json',
+    'projects.json',
+    'dev-environments.json',
+    'view-preferences.json',
+    'chat-history.json',
+    'mcp-config.json',
+    'agents.json',
+    'rag-index.db',
+    'rag-config.json'
+  ];
+  
+  let migrationCount = 0;
+  filesToMigrate.forEach(filename => {
+    const oldPath = path.join(oldUserDataDir, filename);
+    const newPath = path.join(dataDir, filename);
+    
+    if (fs.existsSync(oldPath) && !fs.existsSync(newPath)) {
+      try {
+        fs.copyFileSync(oldPath, newPath);
+        migrationCount++;
+        console.log(`Migrated ${filename} to ${dataDir}`);
+      } catch (error) {
+        console.error(`Error migrating ${filename}:`, error);
+      }
+    }
+  });
+  
+  // Migrate bin directory
+  const oldBinDir = path.join(oldUserDataDir, 'bin');
+  const newBinDir = path.join(dataDir, 'bin');
+  if (fs.existsSync(oldBinDir) && fs.statSync(oldBinDir).isDirectory()) {
+    try {
+      const files = fs.readdirSync(oldBinDir);
+      files.forEach(file => {
+        const oldFilePath = path.join(oldBinDir, file);
+        const newFilePath = path.join(newBinDir, file);
+        if (!fs.existsSync(newFilePath)) {
+          fs.copyFileSync(oldFilePath, newFilePath);
+          // Preserve executable permissions
+          const stats = fs.statSync(oldFilePath);
+          fs.chmodSync(newFilePath, stats.mode);
+          migrationCount++;
+        }
+      });
+      console.log(`Migrated bin directory to ${newBinDir}`);
+    } catch (error) {
+      console.error('Error migrating bin directory:', error);
+    }
+  }
+  
+  // Migrate agents subdirectories (chat histories per agent)
+  const oldAgentsDir = path.join(oldUserDataDir, 'agents');
+  const newAgentsDir = path.join(dataDir, 'agents');
+  if (fs.existsSync(oldAgentsDir) && fs.statSync(oldAgentsDir).isDirectory()) {
+    try {
+      const agentDirs = fs.readdirSync(oldAgentsDir);
+      agentDirs.forEach(agentId => {
+        const oldAgentDir = path.join(oldAgentsDir, agentId);
+        const newAgentDir = path.join(newAgentsDir, agentId);
+        
+        if (fs.statSync(oldAgentDir).isDirectory()) {
+          if (!fs.existsSync(newAgentDir)) {
+            fs.mkdirSync(newAgentDir, { recursive: true });
+          }
+          
+          const files = fs.readdirSync(oldAgentDir);
+          files.forEach(file => {
+            const oldFilePath = path.join(oldAgentDir, file);
+            const newFilePath = path.join(newAgentDir, file);
+            if (!fs.existsSync(newFilePath) && fs.statSync(oldFilePath).isFile()) {
+              fs.copyFileSync(oldFilePath, newFilePath);
+              migrationCount++;
+            }
+          });
+        }
+      });
+      console.log(`Migrated agent directories to ${newAgentsDir}`);
+    } catch (error) {
+      console.error('Error migrating agent directories:', error);
+    }
+  }
+  
+  if (migrationCount > 0) {
+    console.log(`✓ Migrated ${migrationCount} files from ${oldUserDataDir} to ${dataDir}`);
+  }
+}
 
 // Context cache for conversation prefixes
 // Maps conversation prefix hash to cache key for API
@@ -22,6 +145,226 @@ interface ConversationCache {
 
 const conversationCache = new Map<string, ConversationCache>(); // Key: agentId-projectPath-containerId
 const CACHE_TTL = 3600000; // 1 hour TTL for cache entries
+
+// ============================================================================
+// SESSION MANAGEMENT
+// Sessions are stored in ~/.docker-developer/history/<agent>/<session-id>.json
+// Current session per agent is tracked in sessions.json
+// ============================================================================
+
+interface SessionInfo {
+  id: string;
+  agentName: string;
+  createdAt: number;
+  updatedAt: number;
+  messageCount: number;
+}
+
+// Get path to sessions.json (tracks current session per agent)
+function getSessionsConfigPath(): string {
+  return path.join(getDataDirectory(), 'sessions.json');
+}
+
+// Load current sessions configuration (agentName -> sessionId)
+function loadSessionsConfig(): Record<string, string> {
+  try {
+    const sessionsPath = getSessionsConfigPath();
+    if (fs.existsSync(sessionsPath)) {
+      return JSON.parse(fs.readFileSync(sessionsPath, 'utf8'));
+    }
+  } catch (error) {
+    console.error('Error loading sessions config:', error);
+  }
+  return {};
+}
+
+// Save current sessions configuration
+function saveSessionsConfig(sessions: Record<string, string>): void {
+  try {
+    const sessionsPath = getSessionsConfigPath();
+    fs.writeFileSync(sessionsPath, JSON.stringify(sessions, null, 2));
+  } catch (error) {
+    console.error('Error saving sessions config:', error);
+  }
+}
+
+// Get current session ID for an agent (creates new one if not found)
+function getCurrentSessionId(agentName: string): string {
+  const sessions = loadSessionsConfig();
+  
+  if (sessions[agentName]) {
+    return sessions[agentName];
+  }
+  
+  // Create new session
+  const newSessionId = randomUUID();
+  sessions[agentName] = newSessionId;
+  saveSessionsConfig(sessions);
+  
+  return newSessionId;
+}
+
+// Set current session ID for an agent
+function setCurrentSessionId(agentName: string, sessionId: string): void {
+  const sessions = loadSessionsConfig();
+  sessions[agentName] = sessionId;
+  saveSessionsConfig(sessions);
+}
+
+// Get directory path for agent's sessions
+function getAgentSessionsDir(agentName: string): string {
+  return path.join(getDataDirectory(), 'history', agentName);
+}
+
+// Get file path for a specific session
+function getSessionFilePath(agentName: string, sessionId: string): string {
+  return path.join(getAgentSessionsDir(agentName), `${sessionId}.json`);
+}
+
+// Create a new session for an agent
+function createNewSession(agentName: string): string {
+  const sessionId = randomUUID();
+  const sessionDir = getAgentSessionsDir(agentName);
+  
+  // Ensure directory exists
+  if (!fs.existsSync(sessionDir)) {
+    fs.mkdirSync(sessionDir, { recursive: true });
+  }
+  
+  // Create empty session file
+  const sessionPath = getSessionFilePath(agentName, sessionId);
+  fs.writeFileSync(sessionPath, JSON.stringify([], null, 2));
+  
+  // Set as current session
+  setCurrentSessionId(agentName, sessionId);
+  
+  return sessionId;
+}
+
+// List all sessions for an agent
+function listAgentSessions(agentName: string): SessionInfo[] {
+  const sessionDir = getAgentSessionsDir(agentName);
+  
+  if (!fs.existsSync(sessionDir)) {
+    return [];
+  }
+  
+  try {
+    const files = fs.readdirSync(sessionDir);
+    const sessions: SessionInfo[] = [];
+    
+    for (const file of files) {
+      if (file.endsWith('.json')) {
+        const sessionId = file.replace('.json', '');
+        const sessionPath = path.join(sessionDir, file);
+        const stats = fs.statSync(sessionPath);
+        
+        try {
+          const history = JSON.parse(fs.readFileSync(sessionPath, 'utf8'));
+          sessions.push({
+            id: sessionId,
+            agentName,
+            createdAt: stats.birthtimeMs,
+            updatedAt: stats.mtimeMs,
+            messageCount: Array.isArray(history) ? history.length : 0
+          });
+        } catch (error) {
+          console.error(`Error reading session ${sessionId}:`, error);
+        }
+      }
+    }
+    
+    // Sort by updated time (most recent first)
+    sessions.sort((a, b) => b.updatedAt - a.updatedAt);
+    
+    return sessions;
+  } catch (error) {
+    console.error(`Error listing sessions for ${agentName}:`, error);
+    return [];
+  }
+}
+
+// Load session history
+function loadSessionHistory(agentName: string, sessionId: string): Array<{ role: 'user' | 'assistant' | 'system'; content: string }> {
+  try {
+    const sessionPath = getSessionFilePath(agentName, sessionId);
+    if (fs.existsSync(sessionPath)) {
+      const history = JSON.parse(fs.readFileSync(sessionPath, 'utf8'));
+      return Array.isArray(history) ? history : [];
+    }
+  } catch (error) {
+    console.error(`Error loading session ${sessionId} for agent ${agentName}:`, error);
+  }
+  return [];
+}
+
+// Save session history
+function saveSessionHistory(agentName: string, sessionId: string, history: Array<{ role: 'user' | 'assistant' | 'system'; content: string }>): void {
+  try {
+    const sessionDir = getAgentSessionsDir(agentName);
+    if (!fs.existsSync(sessionDir)) {
+      fs.mkdirSync(sessionDir, { recursive: true });
+    }
+    
+    const sessionPath = getSessionFilePath(agentName, sessionId);
+    fs.writeFileSync(sessionPath, JSON.stringify(history, null, 2));
+  } catch (error) {
+    console.error(`Error saving session ${sessionId} for agent ${agentName}:`, error);
+  }
+}
+
+// Delete a session
+function deleteSession(agentName: string, sessionId: string): void {
+  try {
+    const sessionPath = getSessionFilePath(agentName, sessionId);
+    if (fs.existsSync(sessionPath)) {
+      fs.unlinkSync(sessionPath);
+    }
+  } catch (error) {
+    console.error(`Error deleting session ${sessionId} for agent ${agentName}:`, error);
+  }
+}
+
+// Delete all sessions for an agent
+function deleteAllAgentSessions(agentName: string): void {
+  try {
+    const sessionDir = getAgentSessionsDir(agentName);
+    if (fs.existsSync(sessionDir)) {
+      fs.rmSync(sessionDir, { recursive: true, force: true });
+    }
+    
+    // Remove from sessions config
+    const sessions = loadSessionsConfig();
+    delete sessions[agentName];
+    saveSessionsConfig(sessions);
+  } catch (error) {
+    console.error(`Error deleting all sessions for agent ${agentName}:`, error);
+  }
+}
+
+// Helper functions for compatibility with existing code
+// These use the current session for the agent
+function getAgentHistoryFilePath(agentName: string): string {
+  const sessionId = getCurrentSessionId(agentName);
+  return getSessionFilePath(agentName, sessionId);
+}
+
+function loadAgentHistory(agentName: string): Array<{ role: 'user' | 'assistant' | 'system'; content: string }> {
+  const sessionId = getCurrentSessionId(agentName);
+  return loadSessionHistory(agentName, sessionId);
+}
+
+function saveAgentHistory(agentName: string, history: Array<{ role: 'user' | 'assistant' | 'system'; content: string }>): void {
+  const sessionId = getCurrentSessionId(agentName);
+  saveSessionHistory(agentName, sessionId, history);
+}
+
+function appendToAgentHistory(agentName: string, role: 'user' | 'assistant', content: string): void {
+  const sessionId = getCurrentSessionId(agentName);
+  const history = loadSessionHistory(agentName, sessionId);
+  history.push({ role, content });
+  saveSessionHistory(agentName, sessionId, history);
+}
 
 // Generate a hash from conversation prefix (system prompt + early messages)
 function hashConversationPrefix(messages: Array<{ role: string; content: string }>, prefixLength: number = 3): string {
@@ -81,7 +424,7 @@ interface WindowState {
 }
 
 function getWindowStatePath(): string {
-  return path.join(app.getPath('userData'), 'window-state.json');
+  return path.join(getDataDirectory(), 'window-state.json');
 }
 
 function loadWindowState(): WindowState | null {
@@ -316,6 +659,119 @@ async function createWindow() {
 }
 
 app.whenReady().then(async () => {
+  // Initialize centralized data directory and migrate old data
+  initializeDataDirectory();
+  
+  // Regenerate all agent executables to use new paths after migration
+  try {
+    const dataDir = getDataDirectory();
+    const agentsPath = path.join(dataDir, 'agents.json');
+    const binPath = path.join(dataDir, 'bin');
+    
+    if (fs.existsSync(agentsPath)) {
+      const agents = JSON.parse(fs.readFileSync(agentsPath, 'utf8'));
+      
+      agents.forEach((agent: any) => {
+        try {
+          const executableName = agent.name.toLowerCase().replace(/[^a-zA-Z0-9_-]/g, '-');
+          const configPath = path.join(binPath, `.${executableName}.config.json`);
+          const executableConfig = {
+            name: executableName,
+            image: agent.model,
+            context_size: agent.contextSize || 8192,
+            max_tokens: agent.maxTokens || 2048,
+            temperature: agent.temperature || 0.7,
+            top_p: agent.topP || 0.9,
+            top_k: agent.topK || 40,
+            mcp_servers: agent.mcpServers || '',
+            tools: agent.tools || '',
+            tool_choice: agent.toolChoice || 'auto',
+            tool_mode: agent.toolMode || 'prompt',
+            response_format: agent.responseFormat || 'text',
+            debug_mode: agent.debugMode || false
+          };
+          fs.writeFileSync(configPath, JSON.stringify(executableConfig, null, 2));
+          
+          const script = `#!/bin/bash
+# AI Model Executable: ${executableName}
+# Model: ${agent.model}
+# Generated by Docker Developer from Agent: ${agent.name}
+
+# Configuration
+export CONFIG_FILE="${configPath}"
+export MODEL_NAME="${executableName}"
+
+# Read configuration
+read_config() {
+  node -e "const fs=require('fs');const c=JSON.parse(fs.readFileSync('$CONFIG_FILE','utf8'));const v=c['$1'];console.log(v!==undefined?v:'$2');"
+}
+
+IMAGE=$(read_config image)
+CTX_SIZE=$(read_config context_size 8192)
+MAX_TOKENS=$(read_config max_tokens 2048)
+TEMPERATURE=$(read_config temperature 0.7)
+TOP_P=$(read_config top_p 0.9)
+TOP_K=$(read_config top_k 40)
+MCP_SERVERS=$(read_config mcp_servers "")
+TOOLS=$(read_config tools "")
+TOOL_CHOICE=$(read_config tool_choice "auto")
+TOOL_MODE=$(read_config tool_mode "prompt")
+DEBUG=$(read_config debug_mode false)
+
+# Build options for ai-model command
+OPTIONS="--ctx-size $CTX_SIZE"
+OPTIONS="$OPTIONS --max-tokens $MAX_TOKENS"
+OPTIONS="$OPTIONS --temperature $TEMPERATURE"
+OPTIONS="$OPTIONS --top_p $TOP_P"
+OPTIONS="$OPTIONS --top_k $TOP_K"
+if [ -n "$MCP_SERVERS" ]; then
+  OPTIONS="$OPTIONS --mcp-servers $MCP_SERVERS"
+fi
+if [ -n "$TOOLS" ]; then
+  OPTIONS="$OPTIONS --tools $TOOLS"
+fi
+OPTIONS="$OPTIONS --tool-choice $TOOL_CHOICE"
+OPTIONS="$OPTIONS --tool-mode $TOOL_MODE"
+OPTIONS="$OPTIONS --debug $DEBUG"
+
+# Check if we have arguments (prompt mode) or no arguments (interactive mode)
+if [ $# -eq 0 ]; then
+  # No arguments - run in interactive mode
+  # MODEL_NAME is set above and used by ai-model for history file naming
+  exec ai-model run $OPTIONS "$IMAGE"
+else
+  # Arguments provided - run prompt mode
+  # MODEL_NAME is set above and used by ai-model for history file naming
+  exec ai-model prompt $OPTIONS "$IMAGE" "$@"
+fi
+`;
+          
+          const filePath = path.join(binPath, executableName);
+          fs.writeFileSync(filePath, script);
+          fs.chmodSync(filePath, '755');
+          
+          // Also write to old location if it exists (for backward compatibility with PATH)
+          const oldBinPath = path.join(app.getPath('userData'), 'bin');
+          if (fs.existsSync(oldBinPath)) {
+            const oldFilePath = path.join(oldBinPath, executableName);
+            fs.writeFileSync(oldFilePath, script);
+            fs.chmodSync(oldFilePath, '755');
+            
+            // Also write config to old location
+            const oldConfigPath = path.join(oldBinPath, `.${executableName}.config.json`);
+            fs.writeFileSync(oldConfigPath, JSON.stringify(executableConfig, null, 2));
+          }
+          
+          console.log(`✓ Regenerated executable for agent: ${executableName}`);
+        } catch (execError: any) {
+          console.error(`Error regenerating executable for agent ${agent.name}:`, execError);
+        }
+      });
+    }
+  } catch (error) {
+    console.error('Error regenerating agent executables:', error);
+  }
+  
   mainWindow = await createWindow();
 
   // Allow connections from both development and production contexts
@@ -431,8 +887,8 @@ app.whenReady().then(async () => {
     privilegedServers: string[];
   } | null = null;
 
-  // Use userData directory for consistent path across dev and production
-  const binPath = path.join(app.getPath('userData'), 'bin');
+  // Use centralized data directory for consistent path across dev and production
+  const binPath = path.join(getDataDirectory(), 'bin');
   if (fs.existsSync(binPath) && !fs.lstatSync(binPath).isDirectory()) {
     fs.unlinkSync(binPath);
   }
@@ -463,7 +919,9 @@ app.whenReady().then(async () => {
       'ai-model-build-payload.js',
       'ai-model-check-tools.js',
       'ai-model-execute-tools.js',
-      'ai-model-add-user-msg.js'
+      'ai-model-add-user-msg.js',
+      'ai-model-get-agent.js',
+      'ai-model-get-session.js'
     ];
     
     for (const fileName of filesToCopy) {
@@ -476,8 +934,17 @@ app.whenReady().then(async () => {
       }
       
       try {
+        // Copy to new centralized location
         fs.copyFileSync(sourcePath, destPath);
         fs.chmodSync(destPath, '755');
+        
+        // Also copy to old location if it exists (for backward compatibility with PATH)
+        const oldBinPath = path.join(app.getPath('userData'), 'bin');
+        if (fs.existsSync(oldBinPath)) {
+          const oldDestPath = path.join(oldBinPath, fileName);
+          fs.copyFileSync(sourcePath, oldDestPath);
+          fs.chmodSync(oldDestPath, '755');
+        }
       } catch (error) {
         console.error(`Error copying ${fileName}:`, error);
       }
@@ -523,7 +990,7 @@ app.whenReady().then(async () => {
     socket.emit('message', 'welcome to the app!');
 
     // View preferences handlers
-    const viewPreferencesPath = path.join(app.getPath('userData'), 'view-preferences.json');
+    const viewPreferencesPath = path.join(getDataDirectory(), 'view-preferences.json');
 
     socket.on('getViewPreferences', () => {
       try {
@@ -991,14 +1458,14 @@ app.whenReady().then(async () => {
     });
 
     // Editor settings functionality
-    const editorSettingsPath = path.join(app.getPath('userData'), 'editor-settings.json');
+    const editorSettingsPath = path.join(getDataDirectory(), 'editor-settings.json');
 
     // Ensure the editor-settings.json file exists
     if (!fs.existsSync(editorSettingsPath)) {
       try {
-        const userDataDir = app.getPath('userData');
-        if (!fs.existsSync(userDataDir)) {
-          fs.mkdirSync(userDataDir, { recursive: true });
+        const dataDir = getDataDirectory();
+        if (!fs.existsSync(dataDir)) {
+          fs.mkdirSync(dataDir, { recursive: true });
         }
         // Create default editor settings
         const defaultSettings = {
@@ -1035,7 +1502,7 @@ app.whenReady().then(async () => {
     });
 
     // User settings functionality
-    const userSettingsPath = path.join(app.getPath('userData'), 'user-settings.json');
+    const userSettingsPath = path.join(getDataDirectory(), 'user-settings.json');
 
     // Helper to get git config
     const getGitConfig = async () => {
@@ -1224,15 +1691,15 @@ app.whenReady().then(async () => {
       }
     });
 
-    const projectsPath = path.join(app.getPath('userData'), 'projects.json');
+    const projectsPath = path.join(getDataDirectory(), 'projects.json');
 
     // Ensure the projects.json file exists
     if (!fs.existsSync(projectsPath)) {
       try {
-        // Create the userData directory if it doesn't exist
-        const userDataDir = app.getPath('userData');
-        if (!fs.existsSync(userDataDir)) {
-          fs.mkdirSync(userDataDir, { recursive: true });
+        // Create the data directory if it doesn't exist
+        const dataDir = getDataDirectory();
+        if (!fs.existsSync(dataDir)) {
+          fs.mkdirSync(dataDir, { recursive: true });
         }
         // Create an empty projects file
         fs.writeFileSync(projectsPath, JSON.stringify([]), 'utf8');
@@ -1744,6 +2211,9 @@ app.whenReady().then(async () => {
           debug_mode = false
         } = data;
         
+        // Get old bin path for backward compatibility
+        const oldBinPath = path.join(app.getPath('userData'), 'bin');
+        
         // Security check: prevent overriding system binaries
         if (FORBIDDEN_BINARIES.includes(name)) {
           console.error(`[SECURITY] Attempt to create forbidden executable: ${name}`);
@@ -1784,6 +2254,12 @@ app.whenReady().then(async () => {
         };
         fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
         
+        // Also write config to old location if it exists (for backward compatibility with PATH)
+        if (fs.existsSync(oldBinPath)) {
+          const oldConfigPath = path.join(oldBinPath, `.${name}.config.json`);
+          fs.writeFileSync(oldConfigPath, JSON.stringify(config, null, 2));
+        }
+        
         // Create simple wrapper script that calls ai-model
         const script = `#!/bin/bash
 # AI Model Executable: ${name}
@@ -1792,12 +2268,12 @@ app.whenReady().then(async () => {
 # This is a wrapper that calls the base ai-model executable
 
 # Configuration
-CONFIG_FILE="${configPath}"
-MODEL_NAME="${name}"
+export CONFIG_FILE="${configPath}"
+export MODEL_NAME="${name}"
 
 # Read configuration
 read_config() {
-  node -e "const fs=require('fs');const c=JSON.parse(fs.readFileSync('$CONFIG_FILE','utf8'));const v=c.\$1;console.log(v!==undefined?v:'\$2');"
+  node -e "const fs=require('fs');const c=JSON.parse(fs.readFileSync('$CONFIG_FILE','utf8'));const v=c['$1'];console.log(v!==undefined?v:'$2');"
 }
 
 IMAGE=$(read_config image)
@@ -1842,6 +2318,13 @@ fi
         fs.writeFileSync(filePath, script);
         fs.chmodSync(filePath, '755');
         
+        // Also write to old location if it exists (for backward compatibility with PATH)
+        if (fs.existsSync(oldBinPath)) {
+          const oldFilePath = path.join(oldBinPath, name);
+          fs.writeFileSync(oldFilePath, script);
+          fs.chmodSync(oldFilePath, '755');
+        }
+        
         console.log(`✓ Created AI model executable: ${name} -> ${image}`);
         
         const executables = fs.readdirSync(binPath);
@@ -1860,6 +2343,20 @@ fi
         const configPath = path.join(binPath, `.${name}.config.json`);
         if (fs.existsSync(configPath)) {
           fs.unlinkSync(configPath);
+        }
+        
+        // Delete from old location too if it exists
+        const oldBinPath = path.join(app.getPath('userData'), 'bin');
+        if (fs.existsSync(oldBinPath)) {
+          const oldFilePath = path.join(oldBinPath, name);
+          if (fs.existsSync(oldFilePath)) {
+            fs.unlinkSync(oldFilePath);
+          }
+          
+          const oldConfigPath = path.join(oldBinPath, `.${name}.config.json`);
+          if (fs.existsSync(oldConfigPath)) {
+            fs.unlinkSync(oldConfigPath);
+          }
         }
         
         // Delete history file if it exists
@@ -2043,14 +2540,14 @@ fi
     });
 
     // Dev Environments functionality
-    const devEnvironmentsPath = path.join(app.getPath('userData'), 'dev-environments.json');
+    const devEnvironmentsPath = path.join(getDataDirectory(), 'dev-environments.json');
 
     // Ensure the dev-environments.json file exists
     if (!fs.existsSync(devEnvironmentsPath)) {
       try {
-        const userDataDir = app.getPath('userData');
-        if (!fs.existsSync(userDataDir)) {
-          fs.mkdirSync(userDataDir, { recursive: true });
+        const dataDir = getDataDirectory();
+        if (!fs.existsSync(dataDir)) {
+          fs.mkdirSync(dataDir, { recursive: true });
         }
         fs.writeFileSync(devEnvironmentsPath, JSON.stringify({}), 'utf8');
       } catch (error) {
@@ -3224,7 +3721,7 @@ exec "$@"
           };
         });
         
-        additionalConfigPath = path.join(app.getPath('userData'), `mcp-privileged-shared.yaml`);
+        additionalConfigPath = path.join(getDataDirectory(), 'mcp', `mcp-privileged-shared.yaml`);
         
         // Try multiple config formats - registry.yaml style and config.yaml style
         const registryYaml = Object.entries(additionalConfig.registry).map(([name, opts]: [string, any]) => {
@@ -3629,8 +4126,8 @@ exec "$@"
       });
     };
 
-    // Send chat prompt to AI model with MCP tool support
-    socket.on('sendChatPrompt', async ({ requestId, prompt, conversationHistory, model, thinkingTokens, projectPath, containerId, agentId, agentTools, agentPrivilegedTools, requestedTools, agentName, agentNickname, agentJobTitle, userName, userEmail, userNickname, userLanguage, userAge, userGender, userOrientation, userJobTitle, userEmployer, userEducationLevel, userPoliticalIdeology, userReligion, userInterests, userCountry, userState, userZipcode, image }: { 
+    // Send chat prompt to AI model by spawning agent executable
+    socket.on('sendChatPrompt', async ({ requestId, prompt, model, thinkingTokens, projectPath, containerId, agentId, requestedTools, agentName, agentNickname, agentJobTitle, userName, userEmail, userNickname, userLanguage, userAge, userGender, userOrientation, userJobTitle, userEmployer, userEducationLevel, userPoliticalIdeology, userReligion, userInterests, userCountry, userState, userZipcode, image }: { 
       requestId: string;
       prompt: string;
       conversationHistory?: Array<{ role: 'user' | 'assistant'; content: string }>;
@@ -3664,722 +4161,137 @@ exec "$@"
       image?: { data: string; mediaType: string } | null;
     }) => {
       try {
-        console.log(`Sending prompt to model ${model} with ${thinkingTokens} thinking tokens`);
+        console.log(`[Agent Executable] Spawning agent executable for: ${agentName || model}`);
         
-        // Log if image is included
-        if (image) {
-          console.log('[IMAGE] Image received:', {
-            mediaType: image.mediaType,
-            dataLength: image.data.length
-          });
+        // Get agent info to find executable name
+        if (!agentId || !agentName) {
+          socket.emit('chatError', 'Agent ID and name are required');
+          return;
         }
         
-        // Filter agent tools based on globally enabled servers
-        const mcpConfigPath = path.join(app.getPath('userData'), 'mcp-config.json');
-        let globallyEnabledServers: string[] = [];
-        let globallyPrivilegedServers: string[] = [];
-        let installedServers: string[] = [];
+        const executableName = agentName.toLowerCase().replace(/[^a-zA-Z0-9_-]/g, '-');
+        const executablePath = path.join(binPath, executableName);
         
-        if (fs.existsSync(mcpConfigPath)) {
-          try {
-            const config = JSON.parse(fs.readFileSync(mcpConfigPath, 'utf8'));
-            globallyEnabledServers = config.enabledServers || [];
-            globallyPrivilegedServers = config.privilegedServers || [];
-          } catch (err) {
-            console.error('Error reading MCP config:', err);
-          }
+        // Check if executable exists
+        if (!fs.existsSync(executablePath)) {
+          console.error(`[Agent Executable] Executable not found: ${executablePath}`);
+          socket.emit('chatError', `Agent executable not found. Try recreating the agent.`);
+          return;
         }
         
-        // Get list of installed MCP servers
-        try {
-          const result = require('child_process').execSync('/usr/local/bin/docker mcp server ls --json', {
-            env: { ...process.env, PATH: '/usr/local/bin:/usr/bin:/bin' },
-            encoding: 'utf8'
-          });
-          installedServers = JSON.parse(result);
-        } catch (err) {
-          console.error('Error getting installed MCP servers:', err);
-          // Continue with empty list - will mark all tools as not installed
-        }
+        const responseId = `response-${requestId}`;
+        let firstChunkTime: number | null = null;
+        let outputBuffer = '';
         
-        // Determine effective tools based on global settings and user selection
-        let effectiveTools: string[] = [];
-        let effectivePrivilegedTools: string[] = [];
-        const notInstalledTools: string[] = [];
-        
-        // If user selected specific tools, use only those (that are also globally enabled)
-        // Otherwise, no tools are available by default
-        if (requestedTools && requestedTools.length > 0) {
-          for (const tool of requestedTools) {
-            // Check if tool is installed
-            if (!installedServers.includes(tool)) {
-              notInstalledTools.push(tool);
-              const message = `⚠️ Tool "${tool}" is not installed. Install it using: docker mcp server pull ${tool}`;
-              emitTerminalOutput('warn', message);
-              console.warn(message);
-              continue;
-            }
-            
-            // Check if tool is enabled globally
-            if (globallyEnabledServers.includes(tool)) {
-              // Tool is enabled globally and selected by user
-              effectiveTools.push(tool);
-              // Check if it should be privileged
-              if (globallyPrivilegedServers.includes(tool)) {
-                effectivePrivilegedTools.push(tool);
-              }
-            } else {
-              // Tool is not enabled globally
-              const message = `⚠️ Tool "${tool}" is not enabled globally. Enable it in the AI Tools Manager to use this tool.`;
-              emitTerminalOutput('warn', message);
-              console.warn(message);
-            }
-          }
-          
-          // Log summary of tool selection
-          if (effectiveTools.length > 0) {
-            const message = `[✓] Using ${effectiveTools.length} tool(s): ${effectiveTools.join(', ')}`;
-            emitTerminalOutput('info', message);
-            console.log(message);
-          }
-          
-          if (notInstalledTools.length > 0) {
-            const message = `[WARNING] ${notInstalledTools.length} not installed tool(s): ${notInstalledTools.join(', ')}. Install them to use these tools.`;
-            emitTerminalOutput('warn', message);
-            console.warn(message);
-          }
-        } else {
-          // No tools selected by user - chat will run without tools
-          console.log('[ℹ] No tools selected for this chat');
-        }
-        
-        // Build the prompt with metadata
-        // Only include projectPath if it's provided (agent has Project Path attribute enabled)
-        const contextInfo = projectPath ? `\n[CWD: ${projectPath}]` : '';
-        
-        // Build agent identity info if attributes are enabled
-        const agentIdentityParts: string[] = [];
-        if (agentName) {
-          agentIdentityParts.push(`Your name is: ${agentName}`);
-        }
-        if (agentNickname) {
-          agentIdentityParts.push(`Your nickname is: ${agentNickname}`);
-        }
-        if (agentJobTitle) {
-          agentIdentityParts.push(`Your job title is: ${agentJobTitle}`);
-        }
-        const agentIdentityInfo = agentIdentityParts.length > 0 
-          ? `\n\n[AGENT IDENTITY]\n${agentIdentityParts.join('\n')}\n` 
-          : '';
-        
-        // Build user info if attributes are enabled
-        const userInfoParts: string[] = [];
-        if (userName) {
-          userInfoParts.push(`User's name: ${userName}`);
-        }
-        if (userEmail) {
-          userInfoParts.push(`User's email: ${userEmail}`);
-        }
-        if (userNickname) {
-          userInfoParts.push(`User's nickname: ${userNickname}`);
-        }
-        if (userLanguage) {
-          userInfoParts.push(`User's language: ${userLanguage}`);
-        }
-        if (userAge) {
-          userInfoParts.push(`User's age: ${userAge}`);
-        }
-        if (userGender) {
-          userInfoParts.push(`User's gender identity: ${userGender}`);
-        }
-        if (userOrientation) {
-          userInfoParts.push(`User's gender orientation: ${userOrientation}`);
-        }
-        if (userJobTitle) {
-          userInfoParts.push(`User's job title: ${userJobTitle}`);
-        }
-        if (userEmployer) {
-          userInfoParts.push(`User's employer: ${userEmployer}`);
-        }
-        if (userEducationLevel) {
-          userInfoParts.push(`User's education level: ${userEducationLevel}`);
-        }
-        if (userPoliticalIdeology) {
-          userInfoParts.push(`User's political ideology: ${userPoliticalIdeology}`);
-        }
-        if (userReligion) {
-          userInfoParts.push(`User's religion: ${userReligion}`);
-        }
-        if (userInterests) {
-          userInfoParts.push(`User's interests: ${userInterests}`);
-        }
-        if (userCountry) {
-          userInfoParts.push(`User's country: ${userCountry}`);
-        }
-        if (userState) {
-          userInfoParts.push(`User's state: ${userState}`);
-        }
-        if (userZipcode) {
-          userInfoParts.push(`User's zipcode: ${userZipcode}`);
-        }
-        const userInfo = userInfoParts.length > 0 
-          ? `\n\n[USER INFORMATION]\n${userInfoParts.join('\n')}\n` 
-          : '';
-        
-        // Build RAG context from similar past conversations and files
-        // Note: containerId can be passed from the frontend if chatting within a container context
-        let ragContext = '';
-        if (agentId) {
-          try {
-            // If we have a projectPath, ensure it's indexed (auto-index on first use)
-            // Run indexing in background - it may not be available for this query but will be for future ones
-            if (projectPath && ragService.isInitialized()) {
-              ragService.getGitHubRepoInfo(null, projectPath)
-                .then((repoInfo) => {
-                  // Index if not already indexed or if more than 1 hour old
-                  if (!repoInfo || (Date.now() - repoInfo.lastIndexed.getTime()) > 3600000) {
-                    console.log(`Auto-indexing project filesystem and GitHub repo: ${projectPath}`);
-                    ragService.indexProjectFiles(projectPath, undefined, (status) => {
-                      if (status) {
-                        emitTerminalOutput('info', `[RAG] ${status}`);
-                        io.emit('ragIndexingStatus', { status });
-                      } else {
-                        io.emit('ragIndexingStatus', { status: null });
-                      }
-                    })
-                      .then(() => ragService.indexGitHubRepoInfo(projectPath))
-                      .then(() => {
-                        console.log('[✓] Project filesystem and GitHub repo indexed');
-                      })
-                      .catch((indexError) => {
-                        console.error('Error auto-indexing project:', indexError);
-                      });
-                  }
-                })
-                .catch((error) => {
-                  console.error('Error checking GitHub repo info:', error);
-                });
-            }
-            
-            ragContext = await ragService.buildRAGContext(prompt, agentId, projectPath, containerId || null);
-            if (ragContext) {
-              console.log('Added RAG context from filesystem and git repository');
-              console.log('RAG context length:', ragContext.length, 'characters');
-              // Log a preview of what's included
-              if (ragContext.includes('[RELEVANT FILESYSTEM FILES]')) {
-                console.log('[✓] Filesystem files included in RAG context');
-              }
-              if (ragContext.includes('[GITHUB REPOSITORY INFORMATION]')) {
-                console.log('[✓] GitHub repository information included in RAG context');
-              }
-            } else {
-              console.log('No RAG context found (this may be normal for first-time queries or unindexed projects)');
-            }
-          } catch (err) {
-            console.error('Failed to build RAG context:', err);
-          }
-        }
-        
-        // Generate responseId for status updates
-        const responseId = Date.now().toString();
-        
-        // Use HTTP API instead of docker model run
-        // The API endpoint provides detailed metrics in the response
-        console.log(`Using HTTP API for model ${model} with ${thinkingTokens} thinking tokens`);
-        
-        // Emit status update
-        socket.emit('chatStatusUpdate', {
-          id: responseId,
-          status: 'Processing request...',
-          details: 'Running model via HTTP API'
+        // Spawn the agent executable with the prompt
+        // spawn without shell handles spaces in paths properly
+        // The executable has #!/bin/bash shebang so it will run correctly
+        console.log(`[Agent Executable] Executing: ${executablePath} "${prompt}"`);
+        const agentProcess = spawn(executablePath, [prompt], {
+          env: process.env // Use full environment including PATH with node, ai-model, etc.
         });
         
-        // Track request start time for latency calculation
-        const requestStartTime = Date.now();
+        // Store process for abortion
+        activeProcesses.set(requestId, agentProcess);
         
-        // Determine if tools should be enabled for this conversation
-        // Tools are enabled when:
-        // 1. Agent has tools configured (effectiveTools.length > 0)
-        // 2. User has requested to use tools (requestedTools && requestedTools.length > 0)
-        const shouldEnableTools = effectiveTools.length > 0 && requestedTools && requestedTools.length > 0;
-        
-        // Filter effective tools to only include requested ones
-        const activeTools = shouldEnableTools 
-          ? effectiveTools.filter(tool => requestedTools.includes(tool))
-          : [];
-        
-        // Ensure MCP gateway is running if tools are needed
-        let mcpClient: MCPClient | null = null;
-        if (activeTools.length > 0) {
-          try {
-            console.log(`[TOOL] Tools are active for this conversation: ${activeTools.join(', ')}`);
-            emitTerminalOutput('info', `[TOOL] Activating tools: ${activeTools.join(', ')}`);
-            
-            // Check if shared gateway exists and has the right configuration
-            const needsRestart = !sharedGateway || 
-              !arraysEqual(sharedGateway.enabledServers, activeTools) ||
-              !arraysEqual(sharedGateway.privilegedServers, effectivePrivilegedTools.filter(t => activeTools.includes(t)));
-            
-            if (needsRestart) {
-              // Stop existing gateway if configuration changed
-              if (sharedGateway) {
-                console.log('Restarting MCP gateway with new tool configuration...');
-                await stopGateway();
-              }
-              
-              // Start gateway with requested tools
-              console.log(`Starting MCP gateway with tools: ${activeTools.join(', ')}`);
-              const privilegedActiveTools = effectivePrivilegedTools.filter(t => activeTools.includes(t));
-              sharedGateway = await startMCPGateway(activeTools, privilegedActiveTools);
-              
-              if (!sharedGateway) {
-                throw new Error('Failed to start MCP gateway');
-              }
-            }
-            
-            // TypeScript flow analysis: ensure sharedGateway is not null
-            if (!sharedGateway) {
-              throw new Error('MCP gateway is not initialized');
-            }
-            
-            mcpClient = sharedGateway.client;
-            
-            if (!mcpClient.isConnected()) {
-              throw new Error('MCP client is not connected');
-            }
-            
-            console.log('[✓] MCP gateway is ready and connected');
-            emitTerminalOutput('info', '[✓] MCP gateway ready');
-            
-            // Emit updated tools list to all connected clients
-            if (sharedGateway && sharedGateway.client && sharedGateway.client.isConnected()) {
-              const tools = sharedGateway.client.getTools();
-              const toolNames = tools.map((t: any) => t.name);
-              console.log(`Emitting ${toolNames.length} MCP tools:`, toolNames.join(', '));
-              io.emit('mcpToolsUpdated', toolNames);
-            }
-          } catch (err: any) {
-            console.error('Error setting up MCP gateway:', err);
-            emitTerminalOutput('error', `[ERROR] Failed to setup MCP gateway: ${err.message}`);
-            socket.emit('chatError', `Failed to setup tools: ${err.message}`);
-            return;
-          }
-        }
-        
-        // Track context breakdown for error reporting
-        const contextBreakdown: { [key: string]: number } = {};
-        
-        // Build system prompt with agent/user information and RAG context
-        const systemPromptParts: string[] = ['You are a helpful assistant.'];
-        contextBreakdown['Base System Prompt'] = estimateTokens(systemPromptParts[0]);
-        
-        if (agentIdentityInfo) {
-          systemPromptParts.push(agentIdentityInfo);
-          contextBreakdown['Agent Identity'] = estimateTokens(agentIdentityInfo);
-        }
-        if (userInfo) {
-          systemPromptParts.push(userInfo);
-          contextBreakdown['User Info'] = estimateTokens(userInfo);
-        }
-        if (contextInfo) {
-          systemPromptParts.push(contextInfo);
-          contextBreakdown['Context Info'] = estimateTokens(contextInfo);
-        }
-        
-        // Add RAG context (filesystem and git repo) to system prompt if available
-        if (ragContext) {
-          systemPromptParts.push(ragContext);
-          contextBreakdown['RAG/Project Context'] = estimateTokens(ragContext);
-        }
-        
-        // Add tools information to system prompt if tools are active
-        if (mcpClient && activeTools.length > 0) {
-          const toolsPrompt = mcpClient.getToolsPrompt();
-          if (toolsPrompt) {
-            systemPromptParts.push(toolsPrompt);
-            contextBreakdown['MCP Tools Documentation'] = estimateTokens(toolsPrompt);
-            console.log(`Added ${mcpClient.getTools().length} tools to system prompt`);
-          }
-        }
-        
-        const systemPrompt = systemPromptParts.join('\n');
-        
-        // Build messages array for the API with conversation history
-        // Include conversation history for stateful conversations
-        const messages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }> = [
-          { role: 'system', content: systemPrompt }
-        ];
-        
-        // Add conversation history if available
-        if (conversationHistory && conversationHistory.length > 0) {
-          // Estimate token count (rough estimate: 1 token ≈ 4 characters)
-          // We'll use a conservative limit to ensure we don't exceed context window
-          // For most models, we want to leave room for response, so limit to ~75% of context
-          const maxHistoryTokens = Math.floor((thinkingTokens || 8192) * 0.75);
-          let currentTokenCount = estimateTokens(systemPrompt); // System prompt tokens
-          currentTokenCount += estimateTokens(prompt); // Current prompt tokens
+        // Handle stdout (streaming response)
+        agentProcess.stdout.on('data', (data: Buffer) => {
+          const chunk = data.toString('utf8');
+          outputBuffer += chunk;
           
-          // Add conversation history messages from oldest to newest
-          // Stop if we're approaching token limit
-          const historyToInclude: Array<{ role: 'user' | 'assistant'; content: string }> = [];
-          let historyTokens = 0;
-          
-          for (let i = conversationHistory.length - 1; i >= 0; i--) {
-            const msg = conversationHistory[i];
-            const msgTokens = estimateTokens(msg.content);
+          // Track first chunk time
+          if (!firstChunkTime) {
+            firstChunkTime = Date.now();
+            socket.emit('firstChunkTime', { requestId, responseId, timestamp: firstChunkTime });
             
-            // Check if adding this message would exceed our limit
-            if (currentTokenCount + msgTokens > maxHistoryTokens) {
-              console.log(`Limiting conversation history: ${i + 1} messages included, ${conversationHistory.length - i - 1} messages truncated due to token limit`);
-              break;
-            }
-            
-            historyToInclude.unshift(msg); // Add to beginning to maintain chronological order
-            currentTokenCount += msgTokens;
-            historyTokens += msgTokens;
-          }
-          
-          // Add history messages to the array
-          messages.push(...historyToInclude);
-          
-          if (historyToInclude.length > 0) {
-            contextBreakdown['Conversation History'] = historyTokens;
-            console.log(`Including ${historyToInclude.length} messages from conversation history (${historyTokens} tokens)`);
-          }
-        }
-        
-        // Add the current user prompt with optional image
-        if (image) {
-          // If image is provided, use content array format
-          // llama.cpp expects OpenAI vision format (not Anthropic format)
-          const imageContent = [
-            {
-              type: 'text',
-              text: prompt || 'What can you tell me about this image?'
-            },
-            {
-              type: 'image_url',
-              image_url: {
-                url: `data:${image.mediaType};base64,${image.data}`
-              }
-            }
-          ];
-          
-          console.log('Adding image to messages with content:', JSON.stringify({
-            role: 'user',
-            content: imageContent.map(item => 
-              item.type === 'image_url' && item.image_url
-                ? { ...item, image_url: { url: `data:${image.mediaType};base64,<${image.data.length} chars>` } }
-                : item
-            )
-          }));
-          
-          messages.push({ 
-            role: 'user', 
-            content: imageContent as any
-          });
-          contextBreakdown['Current Prompt'] = estimateTokens(prompt) + 1000; // Add estimated tokens for image
-        } else {
-          // Text only
-          messages.push({ role: 'user', content: prompt });
-          contextBreakdown['Current Prompt'] = estimateTokens(prompt);
-        }
-        
-        // Generate cache key for context caching
-        // Use conversation prefix (system prompt + early messages) for caching
-        const cacheKey = getCacheKey(agentId || 'global', projectPath, containerId || null, messages);
-        
-        // Track first chunk time
-        let firstChunkTime: number | null = null;
-        let allTokenUsage: any = null;
-        let allTimings: any = null;
-        
-        // Make initial AI call with streaming
-        // This will either return a final answer or tool call requests
-        try {
-          const initialResponse = await makeAICall(
-            messages,
-            model,
-            thinkingTokens,
-            socket,
-            responseId,
-            requestId,
-            agentId,
-            (chunk: string) => {
-              // Track first chunk time
-              if (!firstChunkTime) {
-                firstChunkTime = Date.now();
-                socket.emit('firstChunkTime', { requestId, responseId, timestamp: firstChunkTime });
-              }
-              
-              // Stream to agent terminal
-              if (agentId) {
-                io.emit('agentThinkingText', { agentId, text: chunk });
-              }
-              
-              // Stream to chat client
-              socket.emit('chatResponseChunk', {
-                id: responseId,
-                chunk: chunk
-              });
-            }
-          );
-          
-          // Store token usage and timings from initial response
-          allTokenUsage = initialResponse.tokenUsage;
-          allTimings = initialResponse.timings;
-          
-          console.log('Initial AI response complete, checking for tool calls...');
-          
-          // Check if the response contains tool call requests
-          const toolCalls = mcpClient && activeTools.length > 0 
-            ? parseToolCalls(initialResponse.content)
-            : [];
-          
-          if (toolCalls.length > 0) {
-            console.log(`Found ${toolCalls.length} tool call(s) in response`);
-            emitTerminalOutput('info', `📋 Agent wants to use ${toolCalls.length} tool(s)`);
-            
-            // Execute all tool calls
-            const toolResults = await executeToolCalls(
-              toolCalls,
-              mcpClient!,
-              socket,
-              responseId,
-              agentId
-            );
-            
-            // Build tool results context for the AI
-            const toolResultsText = toolResults.map(result => {
-              if (result.error) {
-                return `Tool: ${result.name}\nStatus: Error\nError: ${result.error}`;
-              } else {
-                return `Tool: ${result.name}\nStatus: Success\nResult: ${JSON.stringify(result.result, null, 2)}`;
-              }
-            }).join('\n\n');
-            
-            console.log('Tool execution complete, requesting final answer from AI...');
-            emitTerminalOutput('info', '🤖 Generating final answer with tool results...');
-            
-            // Add the initial response with tool calls to conversation
-            messages.push({ role: 'assistant', content: initialResponse.content });
-            
-            // Add tool results as a user message
-            const toolResultsMessage = `Here are the results from the tools you requested:\n\n${toolResultsText}\n\nPlease provide your final answer to the user based on these tool results.`;
-            messages.push({ role: 'user', content: toolResultsMessage });
-            
-            // Track tool results in context breakdown
-            contextBreakdown['Tool Results'] = estimateTokens(toolResultsMessage);
-            
-            // Make follow-up call to get final answer
-            const finalResponse = await makeAICall(
-              messages,
-              model,
-              thinkingTokens,
-              socket,
-              responseId,
-              requestId,
-              agentId,
-              (chunk: string) => {
-                // Stream final response to agent terminal
-                if (agentId) {
-                  io.emit('agentThinkingText', { agentId, text: chunk });
+            // Display agent avatar on first chunk
+            if (agentId) {
+              try {
+                const agentsPath = getAgentsPath();
+                console.log('Loading agents from:', agentsPath);
+                if (fs.existsSync(agentsPath)) {
+                  const agentsFileContent = fs.readFileSync(agentsPath, 'utf8');
+                  const agents = JSON.parse(agentsFileContent);
+                  const agent = agents.find((a: any) => a.id === agentId);
+                  if (agent && agent.avatar) {
+                    console.log('Displaying avatar for agent:', agent.name || agentId);
+                    io.emit('displayAgentAvatar', { agentId, avatar: agent.avatar });
+                  }
                 }
-                
-                // Stream to chat client
-                socket.emit('chatResponseChunk', {
-                  id: responseId,
-                  chunk: chunk
-                });
-              }
-            );
-            
-            // Accumulate token usage from both calls
-            if (finalResponse.tokenUsage) {
-              if (allTokenUsage) {
-                allTokenUsage.prompt_tokens = (allTokenUsage.prompt_tokens || 0) + (finalResponse.tokenUsage.prompt_tokens || 0);
-                allTokenUsage.completion_tokens = (allTokenUsage.completion_tokens || 0) + (finalResponse.tokenUsage.completion_tokens || 0);
-                allTokenUsage.total_tokens = (allTokenUsage.total_tokens || 0) + (finalResponse.tokenUsage.total_tokens || 0);
-              } else {
-                allTokenUsage = finalResponse.tokenUsage;
+              } catch (error: any) {
+                console.error('Error displaying agent avatar:', error);
+                console.error('Error stack:', error.stack);
               }
             }
-            
-            if (finalResponse.timings) {
-              allTimings = finalResponse.timings; // Use latest timings
-            }
-            
-            console.log('[✓] Final answer generated with tool results');
           }
           
-          // Calculate and emit final token usage
-          let promptTokens = 0;
-          let completionTokens = 0;
-          let totalTokens = 0;
-          
-          if (allTokenUsage) {
-            promptTokens = allTokenUsage.prompt_tokens || 0;
-            completionTokens = allTokenUsage.completion_tokens || 0;
-            totalTokens = allTokenUsage.total_tokens || (promptTokens + completionTokens);
-          } else if (allTimings) {
-            promptTokens = allTimings.prompt_n || 0;
-            completionTokens = allTimings.predicted_n || 0;
-            totalTokens = promptTokens + completionTokens;
-          } else {
-            const totalChars = messages.reduce((sum, msg) => sum + msg.content.length, 0);
-            promptTokens = Math.ceil(totalChars / 4);
-            completionTokens = 0;
-            totalTokens = promptTokens;
+          // Stream to agent terminal
+          if (agentId) {
+            io.emit('agentThinkingText', { agentId, text: chunk });
           }
           
-          const maxContext = thinkingTokens;
-          const usagePercent = maxContext > 0 ? Math.round((totalTokens / maxContext) * 100) : 0;
-          
-          socket.emit('tokenUsage', {
-            requestId: requestId,
-            promptTokens: promptTokens,
-            completionTokens: completionTokens,
-            totalTokens: totalTokens,
-            maxContext: maxContext,
-            usagePercent: usagePercent,
-            requestedContext: thinkingTokens,
-            timings: allTimings,
+          // Stream to chat client
+          socket.emit('chatResponseChunk', {
+            id: responseId,
+            chunk: chunk
           });
+        });
+        
+        // Handle stderr (errors and debug info)
+        agentProcess.stderr.on('data', (data: Buffer) => {
+          const errorText = data.toString('utf8');
+          console.error(`[Agent Executable] stderr: ${errorText}`);
+          
+          // Emit to terminal for debugging
+          if (agentId) {
+            io.emit('agentThinkingText', { agentId, text: errorText });
+          }
+        });
+        
+        // Handle process completion
+        agentProcess.on('close', (code: number) => {
+          console.log(`[Agent Executable] Process exited with code ${code}`);
           
           // Remove from active processes
           activeProcesses.delete(requestId);
-          activeProcesses.delete(`${requestId}-ai-call`);
           
-          // Send completion marker
-          socket.emit('chatResponse', {
-            id: responseId,
-            requestId: requestId,
-            content: '',
-            timestamp: new Date(),
-            wasStreamed: true,
-          });
-          
-        } catch (error: any) {
-          console.error('Error in AI call or tool execution:', error);
-          activeProcesses.delete(requestId);
-          activeProcesses.delete(`${requestId}-ai-call`);
-          
-          // Check if this is a context size error
-          const errorMessage = error.message || '';
-          if (errorMessage.includes('exceed_context_size_error') || 
-              errorMessage.includes('exceeds the available context size') ||
-              errorMessage.includes('context size')) {
+          if (code === 0) {
+            // Success - send completion marker
+            socket.emit('chatResponse', {
+              id: responseId,
+              requestId: requestId,
+              content: '',
+              timestamp: new Date(),
+              wasStreamed: true,
+            });
             
-            // Try to parse the actual values from the error message
-            let promptTokens = 'unknown';
-            let contextLimit = 'unknown';
-            
-            // Look for JSON error details in the message
-            const jsonMatch = errorMessage.match(/\{[^}]*"n_prompt_tokens"[^}]*\}/);
-            if (jsonMatch) {
-              try {
-                const errorDetails = JSON.parse(jsonMatch[0]);
-                if (errorDetails.n_prompt_tokens) {
-                  promptTokens = errorDetails.n_prompt_tokens.toString();
-                }
-                if (errorDetails.n_ctx) {
-                  contextLimit = errorDetails.n_ctx.toString();
-                }
-              } catch (e) {
-                // Couldn't parse, use generic message
-              }
-            }
-            
-            // Build dynamic error message with detailed breakdown
-            let errorText = `⚠️ Context Size Exceeded\n\n` +
-              `The request is too large for the current context window.\n\n`;
-            
-            // Show configuration details
-            errorText += `⚙️ **Current Configuration:**\n` +
-              `- "Thinking Tokens" setting: ${thinkingTokens.toLocaleString()} tokens\n` +
-              `- Actual context limit: ${contextLimit !== 'unknown' ? contextLimit : thinkingTokens.toLocaleString()} tokens\n\n`;
-            
-            // Show what we tried to load with breakdown
-            if (promptTokens !== 'unknown') {
-              const promptTokensNum = parseInt(promptTokens);
-              const exceedBy = contextLimit !== 'unknown' 
-                ? promptTokensNum - parseInt(contextLimit)
-                : 'unknown';
-              
-              errorText += `📊 **What We Tried to Load:**\n` +
-                `- Total content size: ${promptTokensNum.toLocaleString()} tokens\n`;
-              
-              if (exceedBy !== 'unknown' && exceedBy > 0) {
-                errorText += `- **Exceeds limit by: ${exceedBy.toLocaleString()} tokens** (${Math.round((exceedBy / parseInt(contextLimit)) * 100)}% over)\n`;
-              }
-              errorText += '\n';
-            }
-            
-            // Add detailed breakdown if available (stored in outer scope)
-            // This will be populated from the context tracking code
-            errorText += `📋 **Content Breakdown:**\n`;
-            if (typeof contextBreakdown !== 'undefined' && Object.keys(contextBreakdown).length > 0) {
-              // Sort by size (largest first) to show what's taking up the most space
-              const sortedBreakdown = Object.entries(contextBreakdown).sort((a, b) => b[1] - a[1]);
-              const totalEstimated = sortedBreakdown.reduce((sum, [_, tokens]) => sum + tokens, 0);
-              
-              for (const [component, tokens] of sortedBreakdown) {
-                const percentage = totalEstimated > 0 ? Math.round((tokens / totalEstimated) * 100) : 0;
-                errorText += `- ${component}: ${tokens.toLocaleString()} tokens (${percentage}%)\n`;
-              }
-              errorText += `- **Total (estimated): ${totalEstimated.toLocaleString()} tokens**\n\n`;
-            } else {
-              errorText += `(Breakdown not available - error occurred during message construction)\n\n`;
-            }
-            
-            // Calculate recommended context size
-            const recommendedSize = promptTokens !== 'unknown' 
-              ? Math.max(Math.ceil(parseInt(promptTokens) * 1.5 / 1024) * 1024, 16384)
-              : Math.max(thinkingTokens * 2, 16384);
-            
-            errorText += `💡 **Solutions (choose one):**\n\n` +
-              `**Option 1: Increase Context Window (Recommended)**\n` +
-              `- Go to Agent Settings\n` +
-              `- Increase "Thinking Tokens" to **${recommendedSize.toLocaleString()}** or higher\n` +
-              `- Current: ${thinkingTokens.toLocaleString()} → Recommended: ${recommendedSize.toLocaleString()}\n\n` +
-              `**Option 2: Reduce Input Size**\n` +
-              `- Clear conversation history (click "New" button)\n` +
-              `- Use a shorter prompt\n` +
-              `- Disable some MCP tools if active\n` +
-              `- Reduce RAG/project context\n\n` +
-              `**Option 3: Use Fewer Tools**\n` +
-              `- Deselect some tools in the Tools dropdown\n` +
-              `- Tool results can be very large\n`;
-            
-            // Send user-friendly context size error
-            socket.emit('chatError', errorText);
-          } else if (errorMessage.includes('Failed to load image') || 
-                     errorMessage.includes('image or audio file') ||
-                     errorMessage.includes('unsupported content')) {
-            // Image-related error - model doesn't support vision
-            const imageErrorText = `⚠️ Vision Not Supported\n\n` +
-              `The current model doesn't support image inputs.\n\n` +
-              `💡 **Solutions:**\n\n` +
-              `**Option 1: Use a Vision Model**\n` +
-              `- Load a vision-capable model (e.g., LLaVA, BakLLaVA)\n` +
-              `- Go to Models tab to load a different model\n` +
-              `- Vision models have names containing "vision", "llava", or "multimodal"\n\n` +
-              `**Option 2: Send Text Only**\n` +
-              `- Remove the image attachment\n` +
-              `- Send your message as text only\n` +
-              `- Describe the image contents in your prompt instead\n\n` +
-              `📝 **Note:** Most language models only support text. You need a specialized ` +
-              `vision model to analyze images.`;
-            
-            socket.emit('chatError', imageErrorText);
+            // Emit token usage (placeholder - executable doesn't return this yet)
+            socket.emit('tokenUsage', {
+              requestId: requestId,
+              promptTokens: 0,
+              completionTokens: 0,
+              totalTokens: 0,
+              maxContext: thinkingTokens,
+              usagePercent: 0,
+              requestedContext: thinkingTokens,
+            });
           } else {
-            // Generic error message
-            socket.emit('chatError', `Failed to process request: ${error.message}`);
+            // Error
+            socket.emit('chatError', `Agent executable exited with code ${code}`);
           }
-        }
-      } catch (error) {
-        console.error('Error sending chat prompt:', error);
-        socket.emit('chatError', 'Failed to send prompt to AI model.');
+        });
+        
+        // Handle process error
+        agentProcess.on('error', (error: Error) => {
+          console.error(`[Agent Executable] Error: ${error.message}`);
+          activeProcesses.delete(requestId);
+          socket.emit('chatError', `Failed to spawn agent executable: ${error.message}`);
+        });
+        
+      } catch (error: any) {
+        console.error('Error spawning agent executable:', error);
+        activeProcesses.delete(requestId);
+        socket.emit('chatError', `Failed to execute agent: ${error.message}`);
       }
     });
 
@@ -4449,7 +4361,7 @@ exec "$@"
       if (projectPath) {
         return path.join(projectPath, '.docker-developer', 'chat-history.json');
       }
-      return path.join(app.getPath('userData'), 'chat-history.json');
+      return path.join(getDataDirectory(), 'chat-history.json');
     };
 
     socket.on('getChatHistory', (projectPath: string | null) => {
@@ -4526,7 +4438,7 @@ exec "$@"
           const serverNames = JSON.parse(stdout);
           
           // Load enabled and privileged servers from config
-          const mcpConfigPath = path.join(app.getPath('userData'), 'mcp-config.json');
+          const mcpConfigPath = path.join(getDataDirectory(), 'mcp-config.json');
           let enabledServers: string[] = [];
           let privilegedServers: string[] = [];
           
@@ -4594,7 +4506,7 @@ exec "$@"
       try {
         console.log(`Toggling MCP server ${serverName} to ${enable ? 'enabled' : 'disabled'}`);
         
-        const mcpConfigPath = path.join(app.getPath('userData'), 'mcp-config.json');
+        const mcpConfigPath = path.join(getDataDirectory(), 'mcp-config.json');
         let config: any = { enabledServers: [], privilegedServers: [] };
         
         if (fs.existsSync(mcpConfigPath)) {
@@ -4620,6 +4532,12 @@ exec "$@"
           console.log(`Disabled server: ${serverName}`);
         }
         
+        // Ensure MCP directory exists
+        const mcpDir = path.dirname(mcpConfigPath);
+        if (!fs.existsSync(mcpDir)) {
+          fs.mkdirSync(mcpDir, { recursive: true });
+        }
+        
         fs.writeFileSync(mcpConfigPath, JSON.stringify(config, null, 2));
         console.log('MCP config saved:', config);
         
@@ -4640,7 +4558,7 @@ exec "$@"
       try {
         console.log(`Toggling MCP server ${serverName} privileged mode to ${privileged ? 'on' : 'off'}`);
         
-        const mcpConfigPath = path.join(app.getPath('userData'), 'mcp-config.json');
+        const mcpConfigPath = path.join(getDataDirectory(), 'mcp-config.json');
         let config: any = { enabledServers: [], privilegedServers: [] };
         
         if (fs.existsSync(mcpConfigPath)) {
@@ -4666,6 +4584,12 @@ exec "$@"
           console.log(`Removed privileged mode from server: ${serverName}`);
         }
         
+        // Ensure MCP directory exists
+        const mcpDir = path.dirname(mcpConfigPath);
+        if (!fs.existsSync(mcpDir)) {
+          fs.mkdirSync(mcpDir, { recursive: true });
+        }
+        
         fs.writeFileSync(mcpConfigPath, JSON.stringify(config, null, 2));
         console.log('MCP config saved:', config);
         
@@ -4683,7 +4607,7 @@ exec "$@"
 
     // Agent Management
     const getAgentsPath = () => {
-      return path.join(app.getPath('userData'), 'agents.json');
+      return path.join(getDataDirectory(), 'agents.json');
     };
 
     const getAgents = () => {
@@ -4692,7 +4616,29 @@ exec "$@"
         if (fs.existsSync(agentsPath)) {
           const fileContent = fs.readFileSync(agentsPath, 'utf8');
           const agents = JSON.parse(fileContent);
-          socket.emit('agents', agents);
+          
+          // Add session count for each agent
+          const historyDir = path.join(getDataDirectory(), 'history');
+          const agentsWithSessions = agents.map((agent: any) => {
+            // Use the same normalization as when saving/loading history
+            const executableName = agent.name.toLowerCase().replace(/[^a-zA-Z0-9_-]/g, '-');
+            const agentSessionDir = path.join(historyDir, executableName);
+            let sessionCount = 0;
+            
+            // Count session files in the agent's session directory
+            if (fs.existsSync(agentSessionDir) && fs.statSync(agentSessionDir).isDirectory()) {
+              try {
+                const sessionFiles = fs.readdirSync(agentSessionDir);
+                sessionCount = sessionFiles.filter(file => file.endsWith('.json')).length;
+              } catch (error) {
+                console.error(`Error reading sessions for agent ${agent.name}:`, error);
+              }
+            }
+            
+            return { ...agent, sessionCount };
+          });
+          
+          socket.emit('agents', agentsWithSessions);
         } else {
           console.log('No agents file found, returning empty list');
           socket.emit('agents', []);
@@ -4722,6 +4668,105 @@ exec "$@"
         fs.writeFileSync(agentsPath, jsonContent, 'utf8');
         console.log('Agent created successfully:', agent.name, 'Total agents:', agents.length);
         
+        // Generate executable for this agent
+        try {
+          const executableName = agent.name.toLowerCase().replace(/[^a-zA-Z0-9_-]/g, '-');
+          const configPath = path.join(binPath, `.${executableName}.config.json`);
+          const executableConfig = {
+            name: executableName,
+            image: agent.model,
+            context_size: agent.contextSize || 8192,
+            max_tokens: agent.maxTokens || 2048,
+            temperature: agent.temperature || 0.7,
+            top_p: agent.topP || 0.9,
+            top_k: agent.topK || 40,
+            mcp_servers: agent.mcpServers || '',
+            tools: agent.tools || '',
+            tool_choice: agent.toolChoice || 'auto',
+            tool_mode: agent.toolMode || 'prompt',
+            response_format: agent.responseFormat || 'text',
+            debug_mode: agent.debugMode || false
+          };
+          fs.writeFileSync(configPath, JSON.stringify(executableConfig, null, 2));
+          
+          // Create simple wrapper script that calls ai-model
+          // Model name (e.g., ai/gemma3) is used for history file path by default
+          const script = `#!/bin/bash
+# AI Model Executable: ${executableName}
+# Model: ${agent.model}
+# Generated by Docker Developer from Agent: ${agent.name}
+
+# Configuration
+export CONFIG_FILE="${configPath}"
+export MODEL_NAME="${executableName}"
+
+# Read configuration
+read_config() {
+  node -e "const fs=require('fs');const c=JSON.parse(fs.readFileSync('$CONFIG_FILE','utf8'));const v=c['$1'];console.log(v!==undefined?v:'$2');"
+}
+
+IMAGE=$(read_config image)
+CTX_SIZE=$(read_config context_size 8192)
+MAX_TOKENS=$(read_config max_tokens 2048)
+TEMPERATURE=$(read_config temperature 0.7)
+TOP_P=$(read_config top_p 0.9)
+TOP_K=$(read_config top_k 40)
+MCP_SERVERS=$(read_config mcp_servers "")
+TOOLS=$(read_config tools "")
+TOOL_CHOICE=$(read_config tool_choice "auto")
+TOOL_MODE=$(read_config tool_mode "prompt")
+DEBUG=$(read_config debug_mode false)
+
+# Build options for ai-model command
+OPTIONS="--ctx-size $CTX_SIZE"
+OPTIONS="$OPTIONS --max-tokens $MAX_TOKENS"
+OPTIONS="$OPTIONS --temperature $TEMPERATURE"
+OPTIONS="$OPTIONS --top_p $TOP_P"
+OPTIONS="$OPTIONS --top_k $TOP_K"
+if [ -n "$MCP_SERVERS" ]; then
+  OPTIONS="$OPTIONS --mcp-servers $MCP_SERVERS"
+fi
+if [ -n "$TOOLS" ]; then
+  OPTIONS="$OPTIONS --tools $TOOLS"
+fi
+OPTIONS="$OPTIONS --tool-choice $TOOL_CHOICE"
+OPTIONS="$OPTIONS --tool-mode $TOOL_MODE"
+OPTIONS="$OPTIONS --debug $DEBUG"
+
+# Check if we have arguments (prompt mode) or no arguments (interactive mode)
+if [ $# -eq 0 ]; then
+  # No arguments - run in interactive mode
+  # MODEL_NAME is set above and used by ai-model for history file naming
+  exec ai-model run $OPTIONS "$IMAGE"
+else
+  # Arguments provided - run prompt mode
+  # MODEL_NAME is set above and used by ai-model for history file naming
+  exec ai-model prompt $OPTIONS "$IMAGE" "$@"
+fi
+`;
+          
+          const filePath = path.join(binPath, executableName);
+          fs.writeFileSync(filePath, script);
+          fs.chmodSync(filePath, '755');
+          
+          // Also write to old location if it exists (for backward compatibility with PATH)
+          const oldBinPath = path.join(app.getPath('userData'), 'bin');
+          if (fs.existsSync(oldBinPath)) {
+            const oldFilePath = path.join(oldBinPath, executableName);
+            fs.writeFileSync(oldFilePath, script);
+            fs.chmodSync(oldFilePath, '755');
+            
+            // Also write config to old location
+            const oldConfigPath = path.join(oldBinPath, `.${executableName}.config.json`);
+            fs.writeFileSync(oldConfigPath, JSON.stringify(executableConfig, null, 2));
+          }
+          
+          console.log(`✓ Created executable for agent: ${executableName} -> ${agent.model}`);
+        } catch (execError: any) {
+          console.error('Error creating executable for agent:', execError);
+          // Continue even if executable creation fails
+        }
+        
         // Broadcast updated agents list to all clients
         io.emit('agents', agents);
       } catch (error: any) {
@@ -4749,6 +4794,105 @@ exec "$@"
           fs.writeFileSync(agentsPath, jsonContent, 'utf8');
           console.log('Agent updated successfully:', updatedAgent.name);
           
+          // Update/regenerate executable for this agent
+          try {
+            const executableName = updatedAgent.name.toLowerCase().replace(/[^a-zA-Z0-9_-]/g, '-');
+            const configPath = path.join(binPath, `.${executableName}.config.json`);
+            const executableConfig = {
+              name: executableName,
+              image: updatedAgent.model,
+              context_size: updatedAgent.contextSize || 8192,
+              max_tokens: updatedAgent.maxTokens || 2048,
+              temperature: updatedAgent.temperature || 0.7,
+              top_p: updatedAgent.topP || 0.9,
+              top_k: updatedAgent.topK || 40,
+              mcp_servers: updatedAgent.mcpServers || '',
+              tools: updatedAgent.tools || '',
+              tool_choice: updatedAgent.toolChoice || 'auto',
+              tool_mode: updatedAgent.toolMode || 'prompt',
+              response_format: updatedAgent.responseFormat || 'text',
+              debug_mode: updatedAgent.debugMode || false
+            };
+            fs.writeFileSync(configPath, JSON.stringify(executableConfig, null, 2));
+            
+            // Create/update simple wrapper script that calls ai-model
+            // Model name (e.g., ai/gemma3) is used for history file path by default
+            const script = `#!/bin/bash
+# AI Model Executable: ${executableName}
+# Model: ${updatedAgent.model}
+# Generated by Docker Developer from Agent: ${updatedAgent.name}
+
+# Configuration
+export CONFIG_FILE="${configPath}"
+export MODEL_NAME="${executableName}"
+
+# Read configuration
+read_config() {
+  node -e "const fs=require('fs');const c=JSON.parse(fs.readFileSync('$CONFIG_FILE','utf8'));const v=c['$1'];console.log(v!==undefined?v:'$2');"
+}
+
+IMAGE=$(read_config image)
+CTX_SIZE=$(read_config context_size 8192)
+MAX_TOKENS=$(read_config max_tokens 2048)
+TEMPERATURE=$(read_config temperature 0.7)
+TOP_P=$(read_config top_p 0.9)
+TOP_K=$(read_config top_k 40)
+MCP_SERVERS=$(read_config mcp_servers "")
+TOOLS=$(read_config tools "")
+TOOL_CHOICE=$(read_config tool_choice "auto")
+TOOL_MODE=$(read_config tool_mode "prompt")
+DEBUG=$(read_config debug_mode false)
+
+# Build options for ai-model command
+OPTIONS="--ctx-size $CTX_SIZE"
+OPTIONS="$OPTIONS --max-tokens $MAX_TOKENS"
+OPTIONS="$OPTIONS --temperature $TEMPERATURE"
+OPTIONS="$OPTIONS --top_p $TOP_P"
+OPTIONS="$OPTIONS --top_k $TOP_K"
+if [ -n "$MCP_SERVERS" ]; then
+  OPTIONS="$OPTIONS --mcp-servers $MCP_SERVERS"
+fi
+if [ -n "$TOOLS" ]; then
+  OPTIONS="$OPTIONS --tools $TOOLS"
+fi
+OPTIONS="$OPTIONS --tool-choice $TOOL_CHOICE"
+OPTIONS="$OPTIONS --tool-mode $TOOL_MODE"
+OPTIONS="$OPTIONS --debug $DEBUG"
+
+# Check if we have arguments (prompt mode) or no arguments (interactive mode)
+if [ $# -eq 0 ]; then
+  # No arguments - run in interactive mode
+  # MODEL_NAME is set above and used by ai-model for history file naming
+  exec ai-model run $OPTIONS "$IMAGE"
+else
+  # Arguments provided - run prompt mode
+  # MODEL_NAME is set above and used by ai-model for history file naming
+  exec ai-model prompt $OPTIONS "$IMAGE" "$@"
+fi
+`;
+            
+            const filePath = path.join(binPath, executableName);
+            fs.writeFileSync(filePath, script);
+            fs.chmodSync(filePath, '755');
+            
+            // Also write to old location if it exists (for backward compatibility with PATH)
+            const oldBinPath = path.join(app.getPath('userData'), 'bin');
+            if (fs.existsSync(oldBinPath)) {
+              const oldFilePath = path.join(oldBinPath, executableName);
+              fs.writeFileSync(oldFilePath, script);
+              fs.chmodSync(oldFilePath, '755');
+              
+              // Also write config to old location
+              const oldConfigPath = path.join(oldBinPath, `.${executableName}.config.json`);
+              fs.writeFileSync(oldConfigPath, JSON.stringify(executableConfig, null, 2));
+            }
+            
+            console.log(`✓ Updated executable for agent: ${executableName} -> ${updatedAgent.model}`);
+          } catch (execError: any) {
+            console.error('Error updating executable for agent:', execError);
+            // Continue even if executable update fails
+          }
+          
           // Broadcast updated agents list to all clients
           io.emit('agents', agents);
         } else {
@@ -4771,9 +4915,43 @@ exec "$@"
           agents = JSON.parse(fs.readFileSync(agentsPath, 'utf8'));
         }
         
+        // Find the agent to get its name before deleting
+        const agentToDelete = agents.find((a: any) => a.id === agentId);
+        
         agents = agents.filter((a: any) => a.id !== agentId);
         fs.writeFileSync(agentsPath, JSON.stringify(agents, null, 2));
         console.log('Agent deleted:', agentId);
+        
+        // Delete associated executable
+        if (agentToDelete) {
+          try {
+            const executableName = agentToDelete.name.toLowerCase().replace(/[^a-zA-Z0-9_-]/g, '-');
+            const executablePath = path.join(binPath, executableName);
+            const configPath = path.join(binPath, `.${executableName}.config.json`);
+            
+            // Delete executable file
+            if (fs.existsSync(executablePath)) {
+              fs.unlinkSync(executablePath);
+              console.log(`✓ Deleted executable: ${executableName}`);
+            }
+            
+            // Delete config file
+            if (fs.existsSync(configPath)) {
+              fs.unlinkSync(configPath);
+              console.log(`✓ Deleted executable config: ${configPath}`);
+            }
+            
+            // Delete history file if it exists
+            const historyFile = path.join(app.getPath('home'), '.docker-developer', 'history', `${executableName}.json`);
+            if (fs.existsSync(historyFile)) {
+              fs.unlinkSync(historyFile);
+              console.log(`✓ Deleted executable history: ${historyFile}`);
+            }
+          } catch (execError: any) {
+            console.error('Error deleting executable for agent:', execError);
+            // Continue even if executable deletion fails
+          }
+        }
         
         // Broadcast updated agents list to all clients
         io.emit('agents', agents);
@@ -4788,7 +4966,7 @@ exec "$@"
       if (projectPath) {
         return path.join(projectPath, '.docker-developer', 'agents', agentId, 'chat-history.json');
       }
-      return path.join(app.getPath('userData'), 'agents', agentId, 'chat-history.json');
+      return path.join(getDataDirectory(), 'agents', agentId, 'chat-history.json');
     };
 
     socket.on('getAgentChatHistory', ({ projectPath, agentId }: { projectPath: string | null; agentId: string }) => {
@@ -4876,6 +5054,273 @@ exec "$@"
       } catch (error) {
         console.error('Error clearing agent chat history:', error);
         socket.emit('agentError', 'Failed to clear agent chat history.');
+      }
+    });
+
+    // Clear current session for agent (no new session created until user sends a message)
+    socket.on('clearAgentHistory', ({ agentId }: { agentId: string }) => {
+      try {
+        // Find the agent to get its name
+        const agentsPath = getAgentsPath();
+        if (fs.existsSync(agentsPath)) {
+          const agents = JSON.parse(fs.readFileSync(agentsPath, 'utf8'));
+          const agent = agents.find((a: any) => a.id === agentId);
+          
+          if (agent) {
+            // Get agent executable name
+            const executableName = agent.name.toLowerCase().replace(/[^a-zA-Z0-9_-]/g, '-');
+            
+            // Delete current session file
+            const sessions = loadSessionsConfig();
+            const currentSessionId = sessions[executableName];
+            if (currentSessionId) {
+              deleteSession(executableName, currentSessionId);
+              console.log(`Deleted current session ${currentSessionId} for agent: ${agent.name}`);
+            }
+            
+            // Remove from sessions config (new session will be created when user sends message)
+            delete sessions[executableName];
+            saveSessionsConfig(sessions);
+          }
+        }
+        
+        socket.emit('agentHistoryCleared', { agentId });
+      } catch (error) {
+        console.error('Error clearing agent history:', error);
+        socket.emit('agentError', 'Failed to clear agent history.');
+      }
+    });
+
+    // Clear all sessions for a specific agent (no new session created until user sends a message)
+    socket.on('clearAllAgentSessions', ({ agentId }: { agentId: string }) => {
+      try {
+        // Find the agent to get its name
+        const agentsPath = getAgentsPath();
+        if (fs.existsSync(agentsPath)) {
+          const agents = JSON.parse(fs.readFileSync(agentsPath, 'utf8'));
+          const agent = agents.find((a: any) => a.id === agentId);
+          
+          if (agent) {
+            const executableName = agent.name.toLowerCase().replace(/[^a-zA-Z0-9_-]/g, '-');
+            deleteAllAgentSessions(executableName);
+            console.log(`Cleared all sessions for agent: ${agent.name}`);
+          }
+        }
+        
+        socket.emit('allAgentSessionsCleared', { agentId });
+      } catch (error) {
+        console.error('Error clearing all agent sessions:', error);
+        socket.emit('agentError', 'Failed to clear all agent sessions.');
+      }
+    });
+
+    // Clear all agents history (all sessions for all agents, no new sessions created)
+    socket.on('clearAllAgentsHistory', () => {
+      try {
+        // Get all agents
+        const agentsPath = getAgentsPath();
+        if (fs.existsSync(agentsPath)) {
+          const agents = JSON.parse(fs.readFileSync(agentsPath, 'utf8'));
+          
+          // Clear all sessions for each agent
+          for (const agent of agents) {
+            const executableName = agent.name.toLowerCase().replace(/[^a-zA-Z0-9_-]/g, '-');
+            deleteAllAgentSessions(executableName);
+            console.log(`Cleared all sessions for agent: ${agent.name}`);
+          }
+        }
+        
+        socket.emit('allAgentsHistoryCleared');
+      } catch (error) {
+        console.error('Error clearing all agents history:', error);
+        socket.emit('agentError', 'Failed to clear all agents history.');
+      }
+    });
+    
+    // Get sessions for an agent
+    socket.on('getAgentSessions', ({ agentId }: { agentId: string }) => {
+      try {
+        const agentsPath = getAgentsPath();
+        if (fs.existsSync(agentsPath)) {
+          const agents = JSON.parse(fs.readFileSync(agentsPath, 'utf8'));
+          const agent = agents.find((a: any) => a.id === agentId);
+          
+          if (agent) {
+            const executableName = agent.name.toLowerCase().replace(/[^a-zA-Z0-9_-]/g, '-');
+            const sessions = listAgentSessions(executableName);
+            const currentSessionId = getCurrentSessionId(executableName);
+            
+            socket.emit('agentSessions', { 
+              agentId, 
+              sessions, 
+              currentSessionId 
+            });
+          } else {
+            socket.emit('agentSessions', { agentId, sessions: [], currentSessionId: null });
+          }
+        } else {
+          socket.emit('agentSessions', { agentId, sessions: [], currentSessionId: null });
+        }
+      } catch (error) {
+        console.error('Error getting agent sessions:', error);
+        socket.emit('agentSessions', { agentId, sessions: [], currentSessionId: null });
+      }
+    });
+    
+    // Set current session for an agent
+    socket.on('setCurrentSession', ({ agentId, sessionId }: { agentId: string; sessionId: string }) => {
+      try {
+        const agentsPath = getAgentsPath();
+        if (fs.existsSync(agentsPath)) {
+          const agents = JSON.parse(fs.readFileSync(agentsPath, 'utf8'));
+          const agent = agents.find((a: any) => a.id === agentId);
+          
+          if (agent) {
+            const executableName = agent.name.toLowerCase().replace(/[^a-zA-Z0-9_-]/g, '-');
+            setCurrentSessionId(executableName, sessionId);
+            console.log(`Set current session to ${sessionId} for agent: ${agent.name}`);
+            socket.emit('currentSessionSet', { agentId, sessionId });
+          }
+        }
+      } catch (error) {
+        console.error('Error setting current session:', error);
+        socket.emit('agentError', 'Failed to set current session.');
+      }
+    });
+    
+    // Create new session for an agent
+    socket.on('createNewSession', ({ agentId }: { agentId: string }) => {
+      try {
+        const agentsPath = getAgentsPath();
+        if (fs.existsSync(agentsPath)) {
+          const agents = JSON.parse(fs.readFileSync(agentsPath, 'utf8'));
+          const agent = agents.find((a: any) => a.id === agentId);
+          
+          if (agent) {
+            const executableName = agent.name.toLowerCase().replace(/[^a-zA-Z0-9_-]/g, '-');
+            const newSessionId = createNewSession(executableName);
+            console.log(`Created new session ${newSessionId} for agent: ${agent.name}`);
+            socket.emit('newSessionCreated', { agentId, sessionId: newSessionId });
+          }
+        }
+      } catch (error) {
+        console.error('Error creating new session:', error);
+        socket.emit('agentError', 'Failed to create new session.');
+      }
+    });
+    
+    // Load session history
+    socket.on('loadSessionHistory', ({ agentId, sessionId }: { agentId: string; sessionId: string }) => {
+      try {
+        const agentsPath = getAgentsPath();
+        if (fs.existsSync(agentsPath)) {
+          const agents = JSON.parse(fs.readFileSync(agentsPath, 'utf8'));
+          const agent = agents.find((a: any) => a.id === agentId);
+          
+          if (agent) {
+            const executableName = agent.name.toLowerCase().replace(/[^a-zA-Z0-9_-]/g, '-');
+            const history = loadSessionHistory(executableName, sessionId);
+            
+            // Convert to message format
+            const messages = history
+              .filter((msg) => msg.role !== 'system')
+              .map((msg, index) => ({
+                id: `${agentId}-${sessionId}-${index}`,
+                type: msg.role === 'user' ? 'prompt' : 'response',
+                content: msg.content,
+                expanded: false,
+                timestamp: new Date(),
+                agent: msg.role === 'assistant' ? agent : null,
+              }));
+            
+            socket.emit('sessionHistory', { agentId, sessionId, messages });
+          }
+        }
+      } catch (error) {
+        console.error('Error loading session history:', error);
+        socket.emit('sessionHistory', { agentId, sessionId, messages: [] });
+      }
+    });
+    
+    // Generate session summary
+    socket.on('generateSessionSummary', async ({ agentId, sessionId }: { agentId: string; sessionId: string }) => {
+      try {
+        const agentsPath = getAgentsPath();
+        if (fs.existsSync(agentsPath)) {
+          const agents = JSON.parse(fs.readFileSync(agentsPath, 'utf8'));
+          const agent = agents.find((a: any) => a.id === agentId);
+          
+          if (agent) {
+            const executableName = agent.name.toLowerCase().replace(/[^a-zA-Z0-9_-]/g, '-');
+            const history = loadSessionHistory(executableName, sessionId);
+            
+            // Get first user message as summary (simple approach)
+            const firstUserMsg = history.find(msg => msg.role === 'user');
+            let summary = firstUserMsg ? firstUserMsg.content.substring(0, 50) : 'Empty session';
+            
+            // If the summary is too short or empty, try to get more context
+            if (summary.length < 10 && history.length > 1) {
+              // Try to get a bit more context from conversation
+              const userMessages = history.filter(msg => msg.role === 'user');
+              if (userMessages.length > 0) {
+                summary = userMessages[0].content.substring(0, 50);
+              }
+            }
+            
+            // Clean up summary (remove newlines, trim)
+            summary = summary.replace(/\n/g, ' ').trim();
+            if (summary.length > 50) {
+              summary = summary.substring(0, 47) + '...';
+            }
+            
+            socket.emit('sessionSummary', { sessionId, summary });
+          }
+        }
+      } catch (error) {
+        console.error('Error generating session summary:', error);
+        socket.emit('sessionSummary', { sessionId, summary: 'Error loading summary' });
+      }
+    });
+
+    // Load agent chat messages from history file (for displaying in GUI)
+    socket.on('loadAgentChatMessages', ({ agentId }: { agentId: string }) => {
+      try {
+        // Find the agent to get its name
+        const agentsPath = getAgentsPath();
+        if (!fs.existsSync(agentsPath)) {
+          socket.emit('agentChatMessages', []);
+          return;
+        }
+
+        const agents = JSON.parse(fs.readFileSync(agentsPath, 'utf8'));
+        const agent = agents.find((a: any) => a.id === agentId);
+        
+        if (!agent) {
+          socket.emit('agentChatMessages', []);
+          return;
+        }
+
+        // Load history from agent name file (e.g., gemma.json)
+        const executableName = agent.name.toLowerCase().replace(/[^a-zA-Z0-9_-]/g, '-');
+        const history = loadAgentHistory(executableName);
+        
+        // Filter out system prompts and convert history format [{role, content}] to ChatMessage format
+        const messages = history
+          .filter((msg) => msg.role !== 'system') // Exclude system prompts
+          .map((msg, index) => ({
+            id: `${agentId}-${index}`,
+            type: msg.role === 'user' ? 'prompt' : 'response',
+            content: msg.content,
+            expanded: false,
+            timestamp: new Date(),
+            agent: msg.role === 'assistant' ? agent : null,
+          }));
+
+        console.log(`Loaded ${messages.length} messages for agent: ${agent.name}`);
+        socket.emit('agentChatMessages', messages);
+      } catch (error) {
+        console.error('Error loading agent chat messages:', error);
+        socket.emit('agentChatMessages', []);
       }
     });
 

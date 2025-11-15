@@ -468,6 +468,76 @@ const Terminal = forwardRef<TerminalRef, TerminalProps>(({ isOpen, onHeightChang
     }
   }, []);
 
+  // Display avatar in any terminal session using HTML overlay
+  const displayTerminalAvatar = useCallback((sessionId: string, avatarData: string) => {
+    const instance = terminalInstancesRef.current.get(sessionId);
+    if (instance && instance.terminal && avatarData) {
+      try {
+        // Get terminal container
+        const terminalContainer = instance.containerRef;
+        
+        // Create or get avatar container
+        let avatarContainer = terminalContainer.querySelector('.avatar-container') as HTMLDivElement;
+        if (!avatarContainer) {
+          avatarContainer = document.createElement('div');
+          avatarContainer.className = 'avatar-container';
+          avatarContainer.style.cssText = `
+            position: absolute;
+            left: 10px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            pointer-events: none;
+            z-index: 10;
+          `;
+          terminalContainer.style.position = 'relative';
+          terminalContainer.appendChild(avatarContainer);
+        }
+        
+        // Create avatar image element
+        const avatarImg = document.createElement('img');
+        avatarImg.src = avatarData;
+        avatarImg.style.cssText = `
+          width: 32px;
+          height: 32px;
+          border-radius: 50%;
+          border: 2px solid #4ade80;
+          background: #1e1e1e;
+          object-fit: cover;
+        `;
+        
+        // Clear previous avatar and add new one
+        avatarContainer.innerHTML = '';
+        avatarContainer.appendChild(avatarImg);
+        
+        // Position avatar one line above current cursor position
+        const terminalElement = terminalContainer.querySelector('.xterm') as HTMLElement;
+        if (terminalElement) {
+          const scrollTop = terminalElement.scrollTop || 0;
+          // Position avatar one line up from current position
+          const lineHeight = 17; // xterm.js default line height
+          const currentLineY = instance.terminal.buffer.active.cursorY * lineHeight;
+          const avatarY = currentLineY - lineHeight - scrollTop + 5;
+          avatarContainer.style.top = `${avatarY}px`;
+        }
+        
+        // Add text spacing to account for avatar
+        instance.terminal.write('      '); // Space for avatar
+      } catch (error) {
+        console.error('Error displaying terminal avatar:', error);
+        // Fallback: just write some spacing
+        instance.terminal.write('  ');
+      }
+    }
+  }, []);
+
+  // Display agent avatar in terminal using HTML overlay (for agent tabs)
+  const displayAgentAvatar = useCallback((agentId: string, avatarData: string) => {
+    const tabId = `agent-${agentId}`;
+    // Use the shared terminal avatar display function
+    displayTerminalAvatar(tabId, avatarData);
+  }, [displayTerminalAvatar]);
+
   // Clear all agent tabs
   const handleClearAgentTabs = useCallback(() => {
     // Find all agent tabs
@@ -493,7 +563,25 @@ const Terminal = forwardRef<TerminalRef, TerminalProps>(({ isOpen, onHeightChang
     const handleTerminalData = (data: { sessionId: string; data: string }) => {
       const instance = terminalInstancesRef.current.get(data.sessionId);
       if (instance && instance.terminal) {
-        instance.terminal.write(data.data);
+        // Check for avatar display marker: \x1b]1338;AVATAR;{agentId};{avatarData}\x07
+        const avatarMarkerRegex = /\x1b\]1338;AVATAR;([^;]+);([^\x07]+)\x07/;
+        const match = data.data.match(avatarMarkerRegex);
+        
+        if (match) {
+          // Found avatar marker - extract data and display
+          const agentId = match[1];
+          const avatarData = match[2];
+          
+          // Display avatar for this terminal session
+          displayTerminalAvatar(data.sessionId, avatarData);
+          
+          // Remove the marker from the output before writing to terminal
+          const cleanedData = data.data.replace(avatarMarkerRegex, '');
+          instance.terminal.write(cleanedData);
+        } else {
+          // No marker, write data as-is
+          instance.terminal.write(data.data);
+        }
       }
     };
 
@@ -505,6 +593,13 @@ const Terminal = forwardRef<TerminalRef, TerminalProps>(({ isOpen, onHeightChang
     };
 
     socket.on('agentThinkingText', handleAgentThinkingText);
+
+    // Handle agent avatar display
+    const handleDisplayAgentAvatar = (data: { agentId: string; avatar: string }) => {
+      displayAgentAvatar(data.agentId, data.avatar);
+    };
+
+    socket.on('displayAgentAvatar', handleDisplayAgentAvatar);
 
     // Handle automatic tab closing when terminal exits with code 0
     const handleTerminalSessionClosed = ({ sessionId }: { sessionId: string }) => {
@@ -520,9 +615,10 @@ const Terminal = forwardRef<TerminalRef, TerminalProps>(({ isOpen, onHeightChang
     return () => {
       socket.off('terminalData', handleTerminalData);
       socket.off('agentThinkingText', handleAgentThinkingText);
+      socket.off('displayAgentAvatar', handleDisplayAgentAvatar);
       socket.off('terminalSessionClosed', handleTerminalSessionClosed);
     };
-  }, [tabs, handleCloseTab, handleWriteToAgentTab]); // Include tabs and handleCloseTab in dependencies
+  }, [tabs, handleCloseTab, handleWriteToAgentTab, displayAgentAvatar, displayTerminalAvatar]); // Include dependencies
 
   // Refit terminals when height changes or tab changes
   useEffect(() => {

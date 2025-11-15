@@ -6,7 +6,6 @@ import Network from './components/Network';
 import Volumes from './components/Volumes';
 import Models from './components/Models';
 import Projects from './components/Projects';
-import Executables from './components/Executables';
 import DevEnvironments from './components/DevEnvironments';
 import VersionControl from './components/VersionControl';
 import ChatPanel, { ChatPanelRef, SelectedContext } from './components/ChatPanel';
@@ -42,7 +41,7 @@ const socket = io('http://localhost:3002');
 const SELECTED_CONTEXT_KEY = 'selectedContext';
 const APP_STATE_KEY = 'appState';
 
-type ViewType = 'projects' | 'executables' | 'devEnvironments' | 'models' | 'tools' | 'agents' | 'images' | 'containers' | 'networks' | 'volumes' | 'settings' | 'editor';
+type ViewType = 'projects' | 'devEnvironments' | 'models' | 'tools' | 'agents' | 'images' | 'containers' | 'networks' | 'volumes' | 'settings' | 'editor';
 
 interface AppState {
   currentView: ViewType;
@@ -356,6 +355,30 @@ function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []); // Only run on mount
 
+  // Listen for agent history cleared events to close chat window
+  useEffect(() => {
+    socket.on('agentHistoryCleared', (data: { agentId: string }) => {
+      // Close chat if the cleared agent is currently selected
+      if (selectedAgent && selectedAgent.id === data.agentId) {
+        setIsChatOpen(false);
+        // Optionally deselect the agent as well
+        // setSelectedAgent(null);
+      }
+    });
+
+    socket.on('allAgentsHistoryCleared', () => {
+      // Always close chat when all history is cleared
+      if (isChatOpen) {
+        setIsChatOpen(false);
+      }
+    });
+
+    return () => {
+      socket.off('agentHistoryCleared');
+      socket.off('allAgentsHistoryCleared');
+    };
+  }, [selectedAgent, isChatOpen]);
+
   // Reload agents when navigating to agents view to ensure we have the latest list
   useEffect(() => {
     if (currentView === 'agents') {
@@ -652,7 +675,6 @@ function App() {
 
   const navItems = [
     { id: 'projects' as ViewType, label: 'Projects', icon: FolderIcon },
-    { id: 'executables' as ViewType, label: 'Executables', icon: CommandLineIcon },
     { id: 'models' as ViewType, label: 'AI Models', icon: CpuChipIcon },
     { id: 'tools' as ViewType, label: 'AI Tools', icon: WrenchScrewdriverIcon },
     { id: 'agents' as ViewType, label: 'Agents', icon: UsersIcon },
@@ -930,7 +952,6 @@ function App() {
               )}
             </div>
           )}
-          {currentView === 'executables' && <Executables key={`${refreshKey}-executables`} />}
           {currentView === 'devEnvironments' && (
             <DevEnvironments 
               key={`${refreshKey}-devEnvironments`}

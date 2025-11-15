@@ -11,22 +11,12 @@ try {
   }
 } catch(e) {}
 
-// Load user settings from userData directory
+// Load user settings from centralized data directory
 let userSettings = null;
 try {
-  // Get userData path - try Electron userData first, fallback to ~/.docker-developer
-  let userDataPath;
-  
-  // Try to detect if we're in an Electron environment
-  try {
-    const electronApp = require('electron').app;
-    userDataPath = electronApp.getPath('userData');
-  } catch(e) {
-    // Not in Electron, use home directory
-    userDataPath = path.join(os.homedir(), 'Library', 'Application Support', 'docker-developer');
-  }
-  
-  const userSettingsPath = path.join(userDataPath, 'user-settings.json');
+  // Use centralized data directory at ~/.docker-developer/
+  const dataDir = path.join(os.homedir(), '.docker-developer');
+  const userSettingsPath = path.join(dataDir, 'user-settings.json');
   
   if (fs.existsSync(userSettingsPath)) {
     userSettings = JSON.parse(fs.readFileSync(userSettingsPath, 'utf8'));

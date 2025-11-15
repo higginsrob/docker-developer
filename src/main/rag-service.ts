@@ -1,6 +1,7 @@
 import path from 'path';
 import * as fs from 'fs';
 import { app } from 'electron';
+import * as os from 'os';
 import initSqlJs, { Database } from 'sql.js';
 import { pipeline, env } from '@xenova/transformers';
 import Docker from 'dockerode';
@@ -93,8 +94,9 @@ export class RAGService {
   ];
   
   constructor() {
-    // Database will be stored in userData directory
-    this.dbPath = path.join(app.getPath('userData'), 'rag-index.db');
+    // Database will be stored in centralized data directory (~/.docker-developer/)
+    const dataDir = path.join(os.homedir(), '.docker-developer');
+    this.dbPath = path.join(dataDir, 'rag-index.db');
     
     // Default configuration
     this.config = {
@@ -122,11 +124,11 @@ export class RAGService {
       // console.log('Initializing RAG service...');
       // console.log('Database path:', this.dbPath);
       
-      // Ensure userData directory exists
-      const userDataDir = path.dirname(this.dbPath);
-      if (!fs.existsSync(userDataDir)) {
-        // console.log('Creating userData directory:', userDataDir);
-        fs.mkdirSync(userDataDir, { recursive: true });
+      // Ensure data directory exists
+      const dataDir = path.dirname(this.dbPath);
+      if (!fs.existsSync(dataDir)) {
+        // console.log('Creating data directory:', dataDir);
+        fs.mkdirSync(dataDir, { recursive: true });
       }
       
       // console.log('Loading or creating database...');
@@ -573,7 +575,8 @@ export class RAGService {
    */
   private loadConfig(): void {
     try {
-      const configPath = path.join(app.getPath('userData'), 'rag-config.json');
+      const dataDir = path.join(os.homedir(), '.docker-developer');
+      const configPath = path.join(dataDir, 'rag-config.json');
       if (fs.existsSync(configPath)) {
         const data = fs.readFileSync(configPath, 'utf8');
         this.config = { ...this.config, ...JSON.parse(data) };
@@ -589,7 +592,8 @@ export class RAGService {
    */
   private saveConfig(): void {
     try {
-      const configPath = path.join(app.getPath('userData'), 'rag-config.json');
+      const dataDir = path.join(os.homedir(), '.docker-developer');
+      const configPath = path.join(dataDir, 'rag-config.json');
       fs.writeFileSync(configPath, JSON.stringify(this.config, null, 2));
     } catch (error) {
       console.error('Failed to save RAG config:', error);
